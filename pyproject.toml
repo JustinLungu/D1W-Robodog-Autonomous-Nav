@@ -10,11 +10,14 @@ dependencies = [
     # OpenCV 5 is very new; stay on the proven 4.x line for the RTSP camera stream.
     "opencv-python>=4.10,<5",
     "pyyaml>=6",
+    # Keyboard teleop window: real key press/release events (a terminal only sees presses).
+    "pygame>=2.5",
 ]
 
 [project.scripts]
 robodog-status = "robodog.cli.status:main"
-robodog-dryrun = "robodog.cli.dryrun:main"
+robodog-stand-test = "robodog.cli.stand_test:main"
+robodog-teleop = "robodog.cli.teleop:main"
 robodog-depth = "robodog.cli.depth:main"
 
 # Computer vision extras. Pick ONE (they pull different PyTorch builds):
@@ -23,7 +26,6 @@ robodog-depth = "robodog.cli.depth:main"
 [project.optional-dependencies]
 vision-cpu = ["torch>=2.4", "transformers>=4.56"]
 vision-gpu = ["torch>=2.4", "transformers>=4.56"]
-robodog-stand-test = "robodog.cli.stand_test:main"
 
 [dependency-groups]
 dev = ["pytest>=8"]

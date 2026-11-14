@@ -2,19 +2,19 @@
 # Never put passwords in here: this repo is public.
 
 network:
-  laptop_ip: "192.168.234.8"   # your laptop's IP on the robot network (must match target_ip on the robot)
+  laptop_ip: "192.168.234.7"   # your laptop's IP on the robot network (must match target_ip on the robot)
   robot_ip: "192.168.234.1"     # Wi-Fi default; Ethernet is 192.168.168.168
   port: 43988                   # must match target_port on the robot; don't change
 
 # Path to the vendor SDK clone. Relative paths are resolved from this file's folder.
-sdk_dir: "../agibot_D1_Edu-Ultra"
+sdk_dir: "../../robodog/agibot_D1_Edu-Ultra"
 
 safety:
   # Motion is OFF unless you turn it on here AND pass --allow-motion on the command line.
-  allow_motion: false
+  allow_motion: true
 
   # Conservative speed caps (the robot can do far more: vx 3.7 m/s, yaw 3 rad/s).
-  max_vx: 0.3          # m/s forward/backward
+  max_vx: 0.6          # m/s forward/backward
   max_vy: 0.2          # m/s sideways
   max_yaw: 0.5         # rad/s turning
 

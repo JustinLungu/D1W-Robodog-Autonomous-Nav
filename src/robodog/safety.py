@@ -188,6 +188,7 @@ class SafeDog:
             self._fault = f"E-STOP ({reason})"
             self._active = False
             self._cmd = (0.0, 0.0, 0.0)
+            self.last_sent = (0.0, 0.0, 0.0)  # nothing moves now; don't keep showing the old speed
         # Step 2, outside the lock: tell the robot. Outside so that a slow or stuck SDK
         # call can't block other threads that need the lock.
         self.log(f"!!! {self._fault}: calling passive()")

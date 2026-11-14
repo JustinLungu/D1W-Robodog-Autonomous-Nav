@@ -7,3 +7,5 @@ __pycache__/
 
 # Recordings
 *.mp4
+*.mkv
+recordings/

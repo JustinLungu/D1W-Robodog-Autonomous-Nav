@@ -276,6 +276,43 @@ Turn motion back off:
 sed -i 's/allow_motion: true/allow_motion: false/' config.local.yaml && grep allow_motion config.local.yaml
 ```
 
+### 6.4b Keyboard driving (`robodog-teleop`)
+Drive the robot from the laptop. It moves **only while a key is held**: let go and it stops immediately. Starts ramp up over a fraction of a second; stops never do. Everything goes through `SafeDog` (speed caps, dead-man switch, battery, e-stop).
+
+Try the controls without the robot first:
+```bash
+uv run robodog-teleop --fake
+```
+On the robot (motion on in the config, see 6.4; 2 m clear, remote in hand):
+```bash
+uv run robodog-teleop --allow-motion
+```
+A small window opens. **Click it**: keys only count while it has focus, and clicking away stops the robot.
+
+| Hold | | Click | |
+|---|---|---|---|
+| **W** / ↑ | forward | **R** | stand up |
+| **S** / ↓ | backward | **F** | lie down |
+| **A** / ← | turn left | **1 2 3** | speed level: 33 % / 66 % / 100 % of the caps |
+| **D** / → | turn right | **SPACE** | **E-stop**: robot goes limp, latched until restart |
+| **Q** / **E** | sideways left / right | **Esc** | lie down and quit (closing the window does the same) |
+
+Speed level 1 is the default. The caps are `max_vx` / `max_vy` / `max_yaw` in `config.local.yaml`.
+
+**Recording a drive** for later tests: add `--record` (and optionally a `--note`):
+```bash
+uv run robodog-teleop --allow-motion --record --note "hallway, chair legs, glass door"
+```
+Each run gets its own folder (git-ignored):
+
+| File | Contents |
+|---|---|
+| `recordings/<date_time>/video.mkv` | Robot camera, saved as sent (no re-encoding) |
+| `commands.csv` | ~30 rows/s: laptop time, keys held, speed asked for and actually sent, standing, battery, mode, fault, events (`stand`, `estop`, `focus_lost`...) |
+| `meta.json` | Start time, camera URL, speed caps, your note, `video_start_unix` |
+
+To match them: laptop time of a video frame = `video_start_unix` + the frame's time in `video.mkv`. Compare that with `t_unix` in the CSV. That's when the frame *arrived* on the laptop; the camera's own delay (~0.2–0.5 s) is not subtracted. The window shows `● REC mm:ss`, or `REC: VIDEO STOPPED` if the camera stream dropped (see `ffmpeg.log` in the folder; the commands keep being recorded). Use `--camera /dev/video0` to record a webcam instead, e.g. with `--fake`.
+
 ### 6.5 Results on our robot
 | Check | Result |
 |---|---|
