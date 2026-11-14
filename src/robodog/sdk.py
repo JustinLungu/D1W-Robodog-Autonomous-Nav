@@ -1,21 +1,4 @@
-"""Load the vendor's wheeled-robot SDK module (mc_sdk_zsl_1w_py) from the SDK clone.
-
-Background
-----------
-AgiBot doesn't publish the SDK on PyPI, so `uv sync` can't install it. It ships as a
-prebuilt binary file inside their GitHub repo, which we clone next to this repo:
-
-    agibot_D1_Edu-Ultra/lib/zsl-1w/x86_64/mc_sdk_zsl_1w_py.cpython-310-x86_64-linux-gnu.so
-                            ^^^^^^ ^^^^^^ ^^^^^^^^^^^^^^^^ ^^^^^^^^^^^
-                            model   CPU    module name      only works on CPython 3.10
-
-Python can import a `.so` file like a normal module, but only if its folder is on
-`sys.path` (the list of folders Python searches when you write `import ...`). This file
-adds the right folder for this computer and imports the module.
-
-This is the ONLY file that knows where the vendor library lives. Everything else gets
-the robot object from `make_highlevel()` and passes it to SafeDog.
-"""
+"""Load the vendor's wheeled-robot SDK module (mc_sdk_zsl_1w_py) from the SDK clone next to this repo."""
 
 from __future__ import annotations
 

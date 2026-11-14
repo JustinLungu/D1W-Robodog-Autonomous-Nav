@@ -4,9 +4,9 @@ Plays a scripted session and shows what SafeDog would send:
   stand -> drive (too fast, gets clamped) -> tiny turn (snapped to 0) -> code goes silent (dead-man)
   -> lie down.  Press SPACE at any time to try the e-stop.
 
-    uv run robodog-dryrun
-    uv run robodog-dryrun --low-battery   # battery drops mid-run -> SafeDog halts and lies down
-    uv run robodog-dryrun --disconnect    # connection drops mid-run -> SafeDog halts
+    uv run python tests/dryrun.py
+    uv run python tests/dryrun.py --low-battery   # battery drops mid-run -> SafeDog halts and lies down
+    uv run python tests/dryrun.py --disconnect    # connection drops mid-run -> SafeDog halts
 """
 
 from __future__ import annotations
@@ -15,10 +15,11 @@ import argparse
 import threading
 import time
 
-from ..config import load_config
-from ..fake import FakeHighLevel
-from ..safety import SafeDog, SafetyError
-from .keys import KeyWatcher
+from fake_robot import FakeHighLevel  # tests/fake_robot.py (same folder)
+
+from robodog.cli.keys import KeyWatcher
+from robodog.config import load_config
+from robodog.safety import SafeDog, SafetyError
 
 
 def main():

@@ -269,9 +269,9 @@ All settings live in one committed file, **[config.local.yaml](config.local.yaml
 Test everything **without the robot**:
 ```bash
 uv run pytest                          # safety + config tests against a fake robot
-uv run robodog-dryrun                  # scripted session on a fake robot; press SPACE to try the e-stop
-uv run robodog-dryrun --low-battery    # see the battery protection kick in
-uv run robodog-dryrun --disconnect     # see the lost-connection protection kick in
+uv run python tests/dryrun.py                  # scripted session on a fake robot; press SPACE to try the e-stop
+uv run python tests/dryrun.py --low-battery    # see the battery protection kick in
+uv run python tests/dryrun.py --disconnect     # see the lost-connection protection kick in
 ```
 
 **Read-only check on the real robot.** It never sends a motion command, so the wheels won't turn:

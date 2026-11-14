@@ -14,7 +14,6 @@ dependencies = [
 
 [project.scripts]
 robodog-status = "robodog.cli.status:main"
-robodog-dryrun = "robodog.cli.dryrun:main"
 
 [dependency-groups]
 dev = ["pytest>=8"]
@@ -28,3 +27,4 @@ packages = ["src/robodog"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["tests"]  # so tests can `import fake_robot`
