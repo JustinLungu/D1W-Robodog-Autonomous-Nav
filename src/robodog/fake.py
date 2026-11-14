@@ -68,9 +68,3 @@ class FakeHighLevel:
 
     def getRPY(self):
         return [0.0, 0.0, 0.0]
-
-    def getPosition(self):
-        return [0.0, 0.0, 0.0]
-
-    def getBodyVelocity(self):
-        return [0.0, 0.0, 0.0]

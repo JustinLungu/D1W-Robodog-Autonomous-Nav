@@ -19,8 +19,6 @@ from typing import Callable
 
 from .config import Config
 
-MODE_PASSIVE, MODE_STAND, MODE_MOVE = 0, 1, 3
-
 # SDK minimum magnitudes for move(): smaller non-zero values are rejected by the robot (api_zsl-1w.md).
 MIN_VX, MIN_VY, MIN_YAW = 0.05, 0.1, 0.1
 
@@ -89,8 +87,6 @@ class SafeDog:
             "battery": int(self.robot.getBatteryPower()),
             "mode": int(self.robot.getCurrentCtrlmode()),
             "rpy": list(self.robot.getRPY()),
-            "fault": self._fault,
-            "motion_allowed": self.allow_motion,
         }
 
     @property
@@ -140,11 +136,6 @@ class SafeDog:
                 _shape(yaw, self.s.max_yaw, MIN_YAW),
             )
             self._cmd_time = self.clock()
-
-    def stop(self):
-        """Zero velocity (always allowed)."""
-        with self._lock:
-            self._cmd = (0.0, 0.0, 0.0)
 
     def estop(self, reason: str = "manual"):
         """Emergency stop: robot goes limp right away. Latched."""
