@@ -2,7 +2,7 @@
 # Never put passwords in here: this repo is public.
 
 network:
-  laptop_ip: "192.168.234.XX"   # your laptop's IP on the robot network (must match target_ip on the robot)
+  laptop_ip: "192.168.234.8"   # your laptop's IP on the robot network (must match target_ip on the robot)
   robot_ip: "192.168.234.1"     # Wi-Fi default; Ethernet is 192.168.168.168
   port: 43988                   # must match target_port on the robot; don't change
 

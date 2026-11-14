@@ -3,7 +3,7 @@
 import pytest
 
 from robodog.config import CONFIG_PATH, load_config
-from robodog.fake import FakeHighLevel
+from fake_robot import FakeHighLevel  # tests/fake_robot.py
 from robodog.safety import MotionBlocked, SafeDog, SafetyError
 
 

@@ -18,7 +18,7 @@ Follow it top to bottom the first time.
 | Handheld remote | Your safety net. Someone holds it during every test |
 | Laptop with **Ubuntu 22.04, x86_64** | The SDK's Python module is built for **Python 3.10** only, which is Ubuntu 22.04's default |
 | Clear floor space | At least 3 × 3 m, nothing fragile |
-| *(Optional)* Ethernet cable | Lower lag than Wi-Fi. See [§7](#7-optional-ethernet-instead-of-wi-fi) |
+| *(Optional)* Ethernet cable | Lower lag than Wi-Fi. See [§8](#8-optional-ethernet-instead-of-wi-fi) |
 
 ---
 
@@ -87,7 +87,7 @@ To add a dependency, use `uv add <package>`, then commit both `pyproject.toml` a
 | Tail light | Meaning |
 |---|---|
 | Solid blue | Booted, ready ✅ |
-| Blinking blue | Still booting. If it never stops, the network config is broken (see [§8](#8-troubleshooting)) |
+| Blinking blue | Still booting. If it never stops, the network config is broken (see [§9](#9-troubleshooting)) |
 | Solid green | SDK has control |
 | Solid white | Lab mode (stunts allowed) |
 | **Solid yellow** | **Battery < 20 %. SDK control is refused.** Charge it |
@@ -101,14 +101,15 @@ To add a dependency, use `uv add <package>`, then commit both `pyproject.toml` a
 
 ## 4. Connect the laptop to the robot (Wi-Fi)
 
-1. Find the robot's Wi-Fi name and password on the **label on its right side or belly**. Then join it:
+1. Join the robot's Wi-Fi. The name and password are on the **label on its right side or belly**:
    ```bash
    nmcli dev wifi connect "<ROBOT_SSID>" password "<ROBOT_WIFI_PASSWORD>"
    ```
-2. Find your laptop's address on the robot network. Write it down; it's `LAPTOP_IP` from here on.
+2. Check you got an address on the robot network. All commands below detect it automatically with the same `grep`:
    ```bash
-   ip -4 -br addr | grep 192.168.234
+   ip -4 -br addr | grep -oP '192\.168\.234\.\d+' | head -1
    ```
+   Expect one address like `192.168.234.8`. Nothing printed = not on the robot's Wi-Fi.
 3. Check you can reach the robot:
    ```bash
    ping -c 3 192.168.234.1
@@ -123,132 +124,173 @@ To add a dependency, use `uv add <package>`, then commit both `pyproject.toml` a
 
 ## 5. Robot: one-time configuration (over SSH)
 
-The robot only sends data to **one** address, set in its config file. You have to point it at your laptop.
+**Why this is needed:** the robot doesn't send its data to whoever connects. It sends it to **one** address written in its config file (`target_ip`), which is `127.0.0.1` (the robot itself) out of the box. Until you point it at your laptop, every SDK program fails, our code and the vendor demo alike, with:
+```
+client bind success
+connect time out
+error async_receive_from
+```
+SSH user and password are both `firefly` (vendor default). Everything is run **from your laptop**, so you never have to type commands on the robot.
 
-1. Log in. The vendor's default user and password are both `firefly`.
-   ```bash
-   ssh firefly@192.168.234.1
-   ```
+**5.1 Check the firmware and point the robot at your laptop** (one command):
+```bash
+MYIP=$(ip -4 -br addr | grep -oP '192\.168\.234\.\d+' | head -1); ssh -t firefly@192.168.234.1 "grep -oP 'motion-control_\K[^_]+' /etc/release/*[^rootfs]*.yaml; sudo cp -n /opt/export/config/sdk_config.yaml /opt/export/config/sdk_config.yaml.bak && sudo sed -i 's/^target_ip:.*/target_ip: \"$MYIP\"/' /opt/export/config/sdk_config.yaml && cat /opt/export/config/sdk_config.yaml"
+```
+The first time, answer `yes` to the host-key question, then enter the password. What we got:
+```
+/etc/release/622002862AIC.yaml:0.5.1-xgw      ← firmware version (xgw = wheeled)
+target_ip: "192.168.234.8"                    ← your laptop's address
+target_port: 43988
+```
+| Firmware you need | Why |
+|---|---|
+| **≥ 0.3.1** | Minimum for the `zsl-1w` SDK |
+| **≥ 0.3.4** | Remote takeover (LT+RT+A / L2+R2+A) while the SDK has control. Below this, the remote is locked out |
 
-2. **Check the firmware version** (still on the robot):
-   ```bash
-   grep -oP 'motion-control_\K[^_]+' /etc/release/*[^rootfs]*.yaml
-   ```
-   | You need (wheeled) | Why |
-   |---|---|
-   | Motion control **≥ 0.3.1** | Minimum for the `zsl-1w` SDK |
-   | Robot software **≥ 0.3.4** (recommended) | Below this, the remote is completely locked out while the SDK is in control. From 0.3.4 you can take control back |
+Ours is `0.5.1-xgw` ✅. If yours is older, ask AgiBot support for an update.
+`cp -n` keeps the original config as `sdk_config.yaml.bak` (and never overwrites an existing backup).
+Don't change `target_port`, and never delete `target_ip` (the robot's motion control won't start without it).
 
-   If it's too old, ask AgiBot support for a firmware update.
-
-3. **Point the SDK at your laptop.** Back up the config, then replace `LAPTOP_IP` with your address from §4:
-   ```bash
-   sudo cp /opt/export/config/sdk_config.yaml /opt/export/config/sdk_config.yaml.bak
-   sudo sed -i 's/^target_ip:.*/target_ip: "LAPTOP_IP"/' /opt/export/config/sdk_config.yaml
-   cat /opt/export/config/sdk_config.yaml
-   ```
-   Expected:
-   ```yaml
-   target_ip: "192.168.234.XX"
-   target_port: 43988
-   ```
-   - **Don't change `target_port`.**
-   - **Don't delete or comment out `target_ip`.** Without it, the robot's motion control won't start.
-
-4. **Reboot the robot.** The change doesn't take effect until you do. This only restarts the robot's computer, like turning it off and on: nothing is deleted, and your edit stays. Do it with the robot lying down. Your SSH session will drop. (Turning it off and on with the power button works too.)
-   ```bash
-   sudo reboot
-   ```
-
-5. Wait for **solid blue**, rejoin its Wi-Fi, and check `LAPTOP_IP` hasn't changed. If it has, redo step 3.
+**5.2 Reboot the robot** (lying down). The setting only takes effect after a reboot. This just restarts the robot's computer, like power-cycling it: nothing is deleted, and the remote stays paired.
+```bash
+ssh -t firefly@192.168.234.1 "sudo reboot"
+```
+The connection closes. Wait for a **solid blue** tail light (about 1–2 min) and rejoin the robot's Wi-Fi if the laptop dropped off. Then check with §6.1.
 
 > ⚠️ **Firmware updates reset this config.** Redo §5 after every update.
-> ⚠️ It's one laptop at a time. To switch laptops, change `target_ip` and reboot again.
+> ⚠️ One laptop at a time. If your laptop's address changes (e.g. another laptop took `.8`), redo §5.
 
 ---
 
-## 6. Smoke tests (in this order)
+## 6. First tests (in this order)
 
-### 6.0 Remote takeover check: do this before anything else
-The physical remote (the joystick/controller that came with the robot) is the safety backup that doesn't depend on our code. Before trusting any script, prove you can always get control back with it.
+The physical remote (the joystick/controller that came with the robot) is the safety backup that doesn't depend on our code. **Keep it switched on and in your hand during every test.** It talks to the robot directly, not through your laptop.
 
-**Needs:** robot firmware **≥ 0.3.4** (§5 step 2). Below that, the takeover doesn't exist.
-
-| Controller | Takeover: hold together |
+| Controller | Take control back from the SDK: hold together |
 |---|---|
 | Logitech gamepad | **LT + RT + A** |
 | Remote with screen | **L2 + R2 + A** |
 
 Tail light: solid **green** = SDK (our code) has control, solid **blue** = remote has control.
+While any SDK program is connected, the remote is ignored until you take over.
 
-**Part A: motion off (safe to do right away)**
-1. **Remote alone:** stand up, drive a little, lie down. That's your baseline.
-2. Set `network.laptop_ip` in `config.local.yaml`, then start `uv run robodog-status --watch` and leave it running. Try the remote again:
-   - Remote still works and the light stays blue → just connecting doesn't take control.
-   - Remote stops responding or the light turns green → connecting already takes control. Do the takeover (LT+RT+A / L2+R2+A) now and check that the remote works again.
-3. Stop the script (Ctrl+C) and check the remote works normally.
+**Battery:** the robot refuses SDK control below **20 %** (yellow tail light), and our code refuses to stand below **25 %**. **Charge to ≥ 50 % before any motion test.** The vendor demo has no battery check at all.
 
-**Part B: first motion test (needs the `SafeDog` stand-up script, not written yet)**
-1. Robot lying down, clear area, one person holding the remote.
-2. The script stands the robot up through `SafeDog` → SDK has control (green light).
-3. Hold **LT+RT+A** / **L2+R2+A** → the light should turn blue and the remote should drive the robot.
-4. Watch what the script does meanwhile. It keeps sending `move(0,0,0)` 30 times a second, and `SafeDog` doesn't yet know a takeover happened. Note whether the robot ignores those commands after the takeover. If it doesn't, `SafeDog` must detect the takeover and stop its loop before any further motion work.
+### 6.1 Read-only status (nothing moves)
+Puts your laptop's address into [config.local.yaml](config.local.yaml) and reads the robot's state:
+```bash
+cd ~/robodog/D1W-Robodog-Autonomous-Nav && MYIP=$(ip -4 -br addr | grep -oP '192\.168\.234\.\d+' | head -1) && echo "laptop IP: $MYIP" && sed -i "s/laptop_ip: \"[^\"]*\"/laptop_ip: \"$MYIP\"/" config.local.yaml && uv run robodog-status
+```
+**Before §5** (or with a wrong `target_ip`), you get this, and nothing else happens:
+```
+laptop IP: 192.168.234.8
+connecting: laptop 192.168.234.8:43988 -> robot 192.168.234.1
+ROBOT SDK is Running, APP Command or other input is InValid!
+mp_recv_cp: 192.168.234.8:43988
+client bind success
+connect time out
+error async_receive_from
+...
+robodog.safety.SafetyError: could not connect: check target_ip on the robot matches laptop_ip, and that the robot was rebooted
+```
+**After §5**, it works:
+```
+laptop IP: 192.168.234.8
+connecting: laptop 192.168.234.8:43988 -> robot 192.168.234.1
+ROBOT SDK is Running, APP Command or other input is InValid!
+mp_recv_cp: 192.168.234.8:43988
+client bind success
+connect success!
+connected
+connected=True  battery=22%  <-- LOW, charge before moving  mode=0 (limp/lying)  rpy=(+0.21, -0.01, -0.32)
+```
+- `ROBOT SDK is Running, APP Command or other input is InValid!` is printed by the vendor library on **every** start. It's a notice that remote/app input is ignored while the SDK is connected, not an error.
+- `rpy` = roll, pitch, yaw in radians. Tilt or turn the robot by hand and run it again: the numbers follow.
 
-Write down the results (tail light colours, mode numbers from `robodog-status`, how the robot reacted) and add them to this README.
+**Watch mode + remote check:**
+```bash
+uv run robodog-status --watch
+```
+While it prints every 0.5 s, stand the robot up and lie it down with the remote. Note whether the remote still works, the tail light colour, and the `mode` numbers. Stop with **Ctrl+C**.
 
-### 6.1 Camera stream (no motion)
+### 6.2 Camera stream (nothing moves)
 ```bash
 ffplay -rtsp_transport tcp -fflags nobuffer -flags low_delay rtsp://192.168.234.1:8554/test
 ```
 You should see the front camera. Press `q` to close.
 
-### 6.2 Read-only connection test (no motion)
-Run from this repo. Replace `LAPTOP_IP`:
+### 6.3 Vendor demo: stand up and lie down only
+Checks the robot obeys SDK commands using AgiBot's own code, before ours. If this works and a later test fails, the problem is in our code.
+
+What to know about their demo ([highlevel_demo.py](../agibot_D1_Edu-Ultra/demo/zsl-1w/python/examples/highlevel_demo.py)):
+- It **stands the robot up by itself** about 3 s after starting, before showing a menu.
+- It prints `Successfully initialized robot connection.` **even when it isn't connected.** If the robot doesn't stand within ~5 s, it isn't connected (go back to §5).
+- No battery check, no e-stop key. **Ctrl+C skips its clean exit**, so quit with `0`.
+- **Don't use `highlevel_demo_ultra-w.py`.** It loads the legged robot's library and calls `jump()` and `backflip()`.
+
+Put your laptop's address into their demo (local edit; undo later with `git checkout -- highlevel_demo.py`):
 ```bash
-uv run python - <<'EOF'
-import os, sys, time, platform
-arch = platform.machine().replace('amd64', 'x86_64').replace('arm64', 'aarch64')
-sys.path.insert(0, os.path.abspath(f'../agibot_D1_Edu-Ultra/lib/zsl-1w/{arch}'))
-import mc_sdk_zsl_1w_py as sdk
-
-app = sdk.HighLevel()
-app.initRobot("LAPTOP_IP", 43988, "192.168.234.1")
-time.sleep(1)
-print("connected:", app.checkConnect())
-print("battery %:", app.getBatteryPower())
-print("ctrl mode:", app.getCurrentCtrlmode(), "(0=limp, 1=standing, 3=moving)")
-print("rpy:", app.getRPY())
-EOF
+cd ~/robodog/agibot_D1_Edu-Ultra/demo/zsl-1w/python/examples && MYIP=$(ip -4 -br addr | grep -oP '192\.168\.234\.\d+' | head -1) && sed -i "s/app.initRobot(\"127.0.0.1\", 43988, \"127.0.0.1\")/app.initRobot(\"$MYIP\", 43988, \"192.168.234.1\")/" highlevel_demo.py && grep -n initRobot highlevel_demo.py
 ```
-`connected: True` and a believable battery number mean the network setup is right.
-`connect time out` means go to [§8](#8-troubleshooting).
+Expect: `38:        app.initRobot("192.168.234.8", 43988, "192.168.234.1")`
 
-### 6.3 First motion: stand up and lie down
-Clear the area. Remote in hand.
+Run it (robot lying down, 2 m clear, remote in hand):
 ```bash
-uv run python - <<'EOF'
-import os, sys, time, platform
-arch = platform.machine().replace('amd64', 'x86_64').replace('arm64', 'aarch64')
-sys.path.insert(0, os.path.abspath(f'../agibot_D1_Edu-Ultra/lib/zsl-1w/{arch}'))
-import mc_sdk_zsl_1w_py as sdk
+python3 highlevel_demo.py
+```
+| You do | Expect |
+|---|---|
+| (start) | `Successfully initialized...`, `Robot is standing up...` → **robot stands up** |
+| wait ~10 s at the menu, type nothing | Note: does it stay standing? (The demo sends nothing while waiting) |
+| `2` ↵ | `Executing: Lie Down` → lies down |
+| `1` ↵ | Stands up |
+| `2` ↵ | Lies down |
+| `0` ↵ | `Exiting demo. Robot will lie down.` → lies down, goes limp, script ends (~6 s) |
 
-app = sdk.HighLevel()
-app.initRobot("LAPTOP_IP", 43988, "192.168.234.1")
-time.sleep(1)
-assert app.getBatteryPower() > 25, "charge the robot first"
-print("stand:", app.standUp());  time.sleep(4)
-print("lie:",   app.lieDown());  time.sleep(4)
-EOF
+**Only use `1`, `2` and `0`.** 3–8 drive, 9 makes it go limp, 10 is a trick.
+Afterwards, stand up and lie down once with the remote to check it's back in control.
+
+### 6.4 Our stand-up test + remote takeover
+The first motion through **our** code ([stand_test.py](src/robodog/cli/stand_test.py)). It stands up through `SafeDog`, holds still for 60 s while printing the status every second, then lies down. It never drives: SafeDog only sends `move(0, 0, 0)` to keep it standing.
+
+Turn motion on in the config (and back off afterwards):
+```bash
+sed -i 's/allow_motion: false/allow_motion: true/' config.local.yaml && grep allow_motion config.local.yaml
+```
+Run it (robot lying down, 2 m clear, remote in hand):
+```bash
+uv run robodog-stand-test --allow-motion
+```
+It connects, prints the battery, and **asks for ENTER before standing** (Ctrl+C there aborts). While it runs:
+
+| Key | Effect |
+|---|---|
+| **SPACE** | E-stop: robot goes limp immediately, script stops sending anything |
+| **q** | Lie down and quit |
+| Ctrl+C | Lie down and quit |
+
+**The takeover test:** while it's standing, hold **LT+RT+A** / **L2+R2+A**. The light should turn blue and the remote should work. Watch whether the robot still reacts to the script's `move(0,0,0)` commands. If it does, `SafeDog` must learn to detect the takeover before any further motion work. Lie the robot down **with the remote**, then press `q`.
+
+Turn motion back off:
+```bash
+sed -i 's/allow_motion: true/allow_motion: false/' config.local.yaml && grep allow_motion config.local.yaml
 ```
 
-### 6.4 Vendor demo (optional)
-The vendor's interactive demo is at `../agibot_D1_Edu-Ultra/demo/zsl-1w/python/examples/highlevel_demo.py`.
-Change its `initRobot("127.0.0.1", 43988, "127.0.0.1")` line to `initRobot("LAPTOP_IP", 43988, "192.168.234.1")` first.
-**Don't use `highlevel_demo_ultra-w.py`.** It loads the legged robot's library and contains `jump()` and `backflip()`.
+### 6.5 Results on our robot
+| Check | Result |
+|---|---|
+| Firmware | `0.5.1-xgw` (takeover supported) |
+| `mode` while lying | `0` |
+| SDK connection after §5 | ✅ `connect success!` |
+| `mode` while standing / moving | _todo (6.1 watch mode, 6.4)_ |
+| Remote while `robodog-status` is connected | _todo (6.1)_ |
+| Tail light while the SDK has control | _todo (6.3 / 6.4)_ |
+| Stays standing while the vendor demo sends nothing? | _todo (6.3)_ |
+| Takeover during our stand test, and does the robot ignore our `move(0,0,0)` afterwards? | _todo (6.4)_ |
 
 ---
 
-## 6.5 Safety layer (`robodog` package)
+## 7. Safety layer (`robodog` package)
 
 All our code talks to the robot through **`SafeDog`** ([src/robodog/safety.py](src/robodog/safety.py)), never through the raw SDK.
 
@@ -269,9 +311,9 @@ All settings live in one committed file, **[config.local.yaml](config.local.yaml
 Test everything **without the robot**:
 ```bash
 uv run pytest                          # safety + config tests against a fake robot
-uv run robodog-dryrun                  # scripted session on a fake robot; press SPACE to try the e-stop
-uv run robodog-dryrun --low-battery    # see the battery protection kick in
-uv run robodog-dryrun --disconnect     # see the lost-connection protection kick in
+uv run python tests/dryrun.py                  # scripted session on a fake robot; press SPACE to try the e-stop
+uv run python tests/dryrun.py --low-battery    # see the battery protection kick in
+uv run python tests/dryrun.py --disconnect     # see the lost-connection protection kick in
 ```
 
 **Read-only check on the real robot.** It never sends a motion command, so the wheels won't turn:
@@ -333,7 +375,7 @@ Rough speed of the `small` model (default input: 308 px on CPU, 518 px on GPU):
 
 ---
 
-## 7. (Optional) Ethernet instead of Wi-Fi
+## 8. (Optional) Ethernet instead of Wi-Fi
 
 Use this when the code runs on a computer mounted on the robot, or when Wi-Fi lag is a problem.
 
@@ -363,23 +405,25 @@ In code, connect with `initRobot("192.168.168.10", 43988, "192.168.168.168")`.
 
 ---
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 | Symptom | Cause / fix |
 |---|---|
-| `connect time out` | `target_ip` on the robot doesn't match your laptop's current address, or the robot wasn't rebooted after editing. Redo §5 |
+| `client bind success` then `connect time out` / `error async_receive_from` | The robot isn't sending to your laptop: `target_ip` doesn't match your laptop's current address, or the robot wasn't rebooted after editing. Redo §5 |
+| `ROBOT SDK is Running, APP Command or other input is InValid!` | Normal. Printed by the vendor library on every start (remote/app input is ignored while the SDK is connected) |
+| `battery=..% <-- LOW` / stand test says `battery ..% is below min_battery` | Charge to ≥ 50 % |
 | Script hangs in `initRobot` | Wrong Boost version (needs 1.74), or the wrong library (`zsl-1` instead of `zsl-1w`) |
 | `ImportError` for `mc_sdk_zsl_1w_py` | You ran plain `python3` instead of `uv run python` (wrong Python version), or `sys.path` doesn't point to `lib/zsl-1w/x86_64`. Check the SDK is cloned next to this repo |
 | Robot ignores the SDK, tail light yellow | Battery < 20 %. Charge it |
 | Remote doesn't work | An SDK program is running and has control. Stop it, or hold **LT+RT+A** (Logitech) / **L2+R2+A** (remote with screen) to take control back (firmware ≥ 0.3.4) |
-| Tail light keeps blinking blue | Network config broken (often the Ethernet settings in §7 with no cable). Log in over Wi-Fi and undo the edits |
+| Tail light keeps blinking blue | Network config broken (often the Ethernet settings in §8 with no cable). Log in over Wi-Fi and undo the edits |
 | Robot suddenly goes limp and lies down | It got no SDK commands for **3 s** (watchdog). Your loop froze or Wi-Fi dropped |
-| Robot "does push-ups" when you press stand on the remote | `SDK_CLIENT_IP` is set to an address that doesn't exist. Fix or remove it (§7) |
+| Robot "does push-ups" when you press stand on the remote | `SDK_CLIENT_IP` is set to an address that doesn't exist. Fix or remove it (§8) |
 | Check the motion-control port is open | On the robot: `sudo lsof -i -P -n -c mc_ctrl \| grep 43997` (should print a line) |
 
 ---
 
-## 9. Safety rules
+## 10. Safety rules
 
 - **Someone always holds the remote** and knows how to take control back (LT+RT+A / L2+R2+A).
 - **No battery protection under SDK control.** The robot can lose power and drop. Check `getBatteryPower()` in every script and stop below ~25 %.
@@ -392,7 +436,7 @@ In code, connect with `initRobot("192.168.168.10", 43988, "192.168.168.168")`.
 
 ---
 
-## 10. Reference
+## 11. Reference
 
 - SDK repo: <https://github.com/AgibotTech/agibot_D1_Edu-Ultra>
 - Wheeled API (Chinese): `agibot_D1_Edu-Ultra/docs/api_zsl-1w.md`

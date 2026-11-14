@@ -23,6 +23,7 @@ robodog-depth = "robodog.cli.depth:main"
 [project.optional-dependencies]
 vision-cpu = ["torch>=2.4", "transformers>=4.56"]
 vision-gpu = ["torch>=2.4", "transformers>=4.56"]
+robodog-stand-test = "robodog.cli.stand_test:main"
 
 [dependency-groups]
 dev = ["pytest>=8"]
@@ -50,3 +51,4 @@ packages = ["src/robodog"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["tests"]  # so tests can `import fake_robot`

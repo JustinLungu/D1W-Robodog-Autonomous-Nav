@@ -1,43 +1,4 @@
-"""SafeDog: the only way our code should talk to the robot.
-
-Why this exists
----------------
-The vendor SDK will do whatever you tell it: full speed, backflips, keep driving after
-your program crashed. It has no battery protection under SDK control. SafeDog sits
-between our code and the robot and enforces the rules below.
-
-    our script  ──►  SafeDog  ──►  robot object (real SDK from sdk.py, or FakeHighLevel from fake.py)
-
-What it guarantees:
-- Motion is blocked unless allow_motion is enabled (config AND caller). Read-only use is the default.
-- Speeds are clamped to conservative caps, and values below the SDK's minimums become exactly 0.
-- Dead-man switch: if your code stops calling set_velocity() for cmd_timeout seconds, speed drops to 0.
-- A steady control loop keeps feeding the robot, so its 3 s watchdog never trips by accident.
-- Low battery: refuses to stand, and stops and lies down if it drops below min_battery while running.
-- Lost connection or an SDK error: stops, tries to lie down, and latches a fault.
-- estop(): calls passive() immediately (robot goes limp) and latches. Nothing moves until a new SafeDog.
-- Stunts (jump, frontJump, backflip, shakeHand) are not exposed at all.
-
-"Latched" means the fault sticks: once set, SafeDog refuses all motion for the rest of
-its life. To move again you stop the program, check what happened, and start a new one.
-That way a problem can't be silently "forgotten" a moment later.
-
-Two threads use SafeDog at the same time
-----------------------------------------
-1. YOUR code (main thread): calls stand(), set_velocity(), lie_down(), estop()...
-   These only change SafeDog's internal state ("what we want").
-2. The LOOP thread (started by start()): calls tick() 30 times a second. tick() is the
-   one that actually sends move() to the robot ("what we send").
-(A third, the keyboard thread in cli/keys.py, may call estop() at any moment.)
-
-Typical use:
-    with SafeDog(robot, cfg, allow_motion=True) as dog:
-        dog.connect()                   # 1. open the connection
-        dog.start()                     # 2. start the 30 Hz loop
-        dog.stand()                     # 3. stand up; from now on the loop sends move()
-        dog.set_velocity(0.2, 0, 0)     # 4. repeat at least every cmd_timeout seconds
-    # leaving the `with` block calls close(): lie down + stop the loop
-"""
+"""SafeDog: safety wrapper between our code and the robot. All robot access goes through it."""
 
 from __future__ import annotations
 
