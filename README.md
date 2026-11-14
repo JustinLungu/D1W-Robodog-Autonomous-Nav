@@ -169,6 +169,33 @@ The robot only sends data to **one** address, set in its config file. You have t
 
 ## 6. Smoke tests (in this order)
 
+### 6.0 Remote takeover check: do this before anything else
+The physical remote (the joystick/controller that came with the robot) is the safety backup that doesn't depend on our code. Before trusting any script, prove you can always get control back with it.
+
+**Needs:** robot firmware **≥ 0.3.4** (§5 step 2). Below that, the takeover doesn't exist.
+
+| Controller | Takeover: hold together |
+|---|---|
+| Logitech gamepad | **LT + RT + A** |
+| Remote with screen | **L2 + R2 + A** |
+
+Tail light: solid **green** = SDK (our code) has control, solid **blue** = remote has control.
+
+**Part A: motion off (safe to do right away)**
+1. **Remote alone:** stand up, drive a little, lie down. That's your baseline.
+2. Set `network.laptop_ip` in `config.local.yaml`, then start `uv run robodog-status --watch` and leave it running. Try the remote again:
+   - Remote still works and the light stays blue → just connecting doesn't take control.
+   - Remote stops responding or the light turns green → connecting already takes control. Do the takeover (LT+RT+A / L2+R2+A) now and check that the remote works again.
+3. Stop the script (Ctrl+C) and check the remote works normally.
+
+**Part B: first motion test (needs the `SafeDog` stand-up script, not written yet)**
+1. Robot lying down, clear area, one person holding the remote.
+2. The script stands the robot up through `SafeDog` → SDK has control (green light).
+3. Hold **LT+RT+A** / **L2+R2+A** → the light should turn blue and the remote should drive the robot.
+4. Watch what the script does meanwhile. It keeps sending `move(0,0,0)` 30 times a second, and `SafeDog` doesn't yet know a takeover happened. Note whether the robot ignores those commands after the takeover. If it doesn't, `SafeDog` must detect the takeover and stop its loop before any further motion work.
+
+Write down the results (tail light colours, mode numbers from `robodog-status`, how the robot reacted) and add them to this README.
+
 ### 6.1 Camera stream (no motion)
 ```bash
 ffplay -rtsp_transport tcp -fflags nobuffer -flags low_delay rtsp://192.168.234.1:8554/test
