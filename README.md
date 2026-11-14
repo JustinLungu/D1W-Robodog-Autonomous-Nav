@@ -155,7 +155,7 @@ The robot only sends data to **one** address, set in its config file. You have t
    - **Don't change `target_port`.**
    - **Don't delete or comment out `target_ip`.** Without it, the robot's motion control won't start.
 
-4. **Reboot the robot.** The change doesn't take effect until you do.
+4. **Reboot the robot.** The change doesn't take effect until you do. This only restarts the robot's computer, like turning it off and on: nothing is deleted, and your edit stays. Do it with the robot lying down. Your SSH session will drop. (Turning it off and on with the power button works too.)
    ```bash
    sudo reboot
    ```
@@ -221,6 +221,56 @@ Change its `initRobot("127.0.0.1", 43988, "127.0.0.1")` line to `initRobot("LAPT
 
 ---
 
+## 6.5 Safety layer (`robodog` package)
+
+All our code talks to the robot through **`SafeDog`** ([src/robodog/safety.py](src/robodog/safety.py)), never through the raw SDK.
+
+| Protection | What it does |
+|---|---|
+| **Motion off by default** | Nothing moves unless `safety.allow_motion: true` is set in `config.local.yaml` **and** the code passes `allow_motion=True` |
+| **Speed caps** | Clamped to `max_vx` / `max_vy` / `max_yaw` (default 0.3 m/s, 0.2 m/s, 0.5 rad/s). Values below the SDK minimums become exactly 0 |
+| **Dead-man switch** | If your code stops calling `set_velocity()` for `cmd_timeout` (0.3 s), the speed drops to 0 |
+| **Keepalive loop** | Sends `move()` at `rate_hz` (30 Hz) while standing, so the robot's 3 s watchdog doesn't trip by accident |
+| **Battery** | Refuses to stand below `min_battery` (25 %). Stops and lies down if the battery drops below that mid-run |
+| **Lost connection / SDK error** | Stops, tries to lie down, and latches a fault. Nothing else is sent until you restart |
+| **E-stop** | `estop()` calls `passive()` (the robot goes limp) and latches. Scripts bind it to **SPACE** |
+| **No stunts** | `jump` / `frontJump` / `backflip` / `shakeHand` aren't exposed at all |
+
+All settings live in one committed file, **[config.local.yaml](config.local.yaml)**. Edit it in place; at minimum set `network.laptop_ip`.
+[src/robodog/config.py](src/robodog/config.py) only defines which keys must exist and their types. A missing key, a typo (`max_vX`) or a wrong type (`allow_motion: "false"` in quotes) stops the program with a clear error instead of being silently ignored. If you add a new setting, add it to `config.local.yaml` and to the class in `config.py`.
+
+Test everything **without the robot**:
+```bash
+uv run pytest                          # safety + config tests against a fake robot
+uv run robodog-dryrun                  # scripted session on a fake robot; press SPACE to try the e-stop
+uv run robodog-dryrun --low-battery    # see the battery protection kick in
+uv run robodog-dryrun --disconnect     # see the lost-connection protection kick in
+```
+
+**Read-only check on the real robot.** It never sends a motion command, so the wheels won't turn:
+```bash
+uv run robodog-status            # connected / battery / mode / tilt, once
+uv run robodog-status --watch    # keep printing until Ctrl+C
+```
+> While any SDK program is connected, the remote may not respond. That's expected. Stop the script to get the remote back.
+
+Using it in your own code:
+```python
+from robodog import SafeDog, load_config
+from robodog.sdk import make_highlevel
+
+cfg = load_config()
+with SafeDog(make_highlevel(cfg.sdk_dir), cfg, allow_motion=True) as dog:
+    dog.connect()
+    dog.start()                 # keepalive / battery / connection loop
+    dog.stand()
+    while running:
+        dog.set_velocity(vx, vy, yaw)   # call at least every 0.3 s
+# leaving the `with` block stops the robot and lies it down
+```
+
+---
+
 ## 7. (Optional) Ethernet instead of Wi-Fi
 
 Use this when the code runs on a computer mounted on the robot, or when Wi-Fi lag is a problem.
@@ -275,7 +325,8 @@ In code, connect with `initRobot("192.168.168.10", 43988, "192.168.168.168")`.
 - **Call `passive()` as an emergency stop.** Bind it to a key in every script.
 - Keep speeds ≤ 0.5 m/s until the code is trusted. `move()` ignores values below its minimum (vx < 0.05 m/s, yaw < 0.1 rad/s), so send exactly `0` to stop.
 - Never call `jump`, `frontJump` or `backflip`, especially with anything mounted on the robot.
-- Don't commit the robot's Wi-Fi password or your network config. Keep them in an untracked `config.local.yaml`.
+- `config.local.yaml` is committed and this repo is public, so never put passwords in it (e.g. the robot's Wi-Fi password).
+- Don't push `allow_motion: true` by accident. Set it only on the machine that's actually driving the robot.
 
 ---
 

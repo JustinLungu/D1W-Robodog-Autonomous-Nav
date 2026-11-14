@@ -1,0 +1,25 @@
+# The one and only config file. It's committed, so edit it in place.
+# Never put passwords in here: this repo is public.
+
+network:
+  laptop_ip: "192.168.234.XX"   # your laptop's IP on the robot network (must match target_ip on the robot)
+  robot_ip: "192.168.234.1"     # Wi-Fi default; Ethernet is 192.168.168.168
+  port: 43988                   # must match target_port on the robot; don't change
+
+# Path to the vendor SDK clone. Relative paths are resolved from this file's folder.
+sdk_dir: "../agibot_D1_Edu-Ultra"
+
+safety:
+  # Motion is OFF unless you turn it on here AND pass --allow-motion on the command line.
+  allow_motion: false
+
+  # Conservative speed caps (the robot can do far more: vx 3.7 m/s, yaw 3 rad/s).
+  max_vx: 0.3          # m/s forward/backward
+  max_vy: 0.2          # m/s sideways
+  max_yaw: 0.5         # rad/s turning
+
+  min_battery: 25      # % - refuse to stand below this; lie down if it drops below while running
+  rate_hz: 30          # control loop rate (robot watchdog trips after 3 s of silence)
+  cmd_timeout: 0.3     # s - velocity resets to 0 if your code stops updating it (dead-man switch)
+  connect_timeout: 5.0 # s - give up connecting after this
+  battery_check_period: 1.0  # s

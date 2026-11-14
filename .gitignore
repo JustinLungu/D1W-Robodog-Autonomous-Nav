@@ -2,9 +2,8 @@
 .venv/
 __pycache__/
 *.pyc
+.vscode/
 
-# Local robot/network config (never commit)
-config.local.yaml
 
 # Recordings
 *.mp4
