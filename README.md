@@ -296,6 +296,41 @@ with SafeDog(make_highlevel(cfg.sdk_dir), cfg, allow_motion=True) as dog:
 # leaving the `with` block stops the robot and lies it down
 ```
 
+## 6.6 Depth from the camera (Depth Anything V2, experimental)
+
+A live view of what [Depth Anything V2](https://github.com/DepthAnything/Depth-Anything-V2) estimates from the robot's RGB camera. It's **vision only**: it never connects to the SDK and is **not** a safety feature. Use it to see how well monocular depth works on your floors and obstacles.
+
+Install the vision extra **once**. Pick the line that matches the laptop:
+```bash
+uv sync --extra vision-cpu    # no NVIDIA GPU: CPU-only PyTorch (~200 MB)
+uv sync --extra vision-gpu    # NVIDIA GPU: CUDA PyTorch (~3 GB)
+```
+The first run downloads the model weights (~100 MB, to `~/.cache/huggingface`).
+
+```bash
+uv run robodog-depth                 # robot camera: rtsp://<robot_ip>:8554/test
+uv run robodog-depth --source 0      # laptop webcam, to try it without the robot
+uv run robodog-depth --size 252      # smaller model input: faster, less detail
+uv run robodog-depth --model base    # bigger model, GPU recommended
+uv run robodog-depth --width 960     # smaller window (default max 1280 px wide); you can also drag to resize
+uv run robodog-depth --headless --frames 20   # no window, print timings only
+```
+The window shows the camera image and the depth image side by side: **bright/yellow = close, dark/purple = far**. Press `q` to quit. The values are **relative**, with no units, and they're rescaled every frame. They show what is in front of what, not distances in metres.
+
+The overlay shows the model's FPS, inference time and *age* (how old the frame was when its depth appeared). The camera's own network delay comes on top of that age.
+
+Rough speed of the `small` model (default input: 308 px on CPU, 518 px on GPU):
+
+| Hardware | Input | Time per frame |
+|---|---|---|
+| Laptop CPU (8 threads) | 518 px | ~2 s |
+| Laptop CPU (8 threads) | 308 px | ~0.4 s (~2 FPS) |
+| Small NVIDIA GPU | 518 px | expect ~20–50 ms |
+
+> **GPU laptop:** check that `nvidia-smi` works first. Current PyTorch CUDA builds don't support very old cards (GTX 9xx/10xx). If `robodog-depth` reports `cpu` or errors on such a card, it needs an older PyTorch build.
+
+> If `uv run pytest` fails with `No module named 'lark'`, your shell has ROS sourced, and pytest is loading ROS's plugin. Run `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run pytest` instead.
+
 ---
 
 ## 7. (Optional) Ethernet instead of Wi-Fi
