@@ -1,0 +1,15 @@
+[project]
+name = "d1w-robodog-autonomous-nav"
+version = "0.1.0"
+description = "Autonomous navigation experiments for the AgiBot D1 wheeled robot dog"
+readme = "README.md"
+# The vendor SDK's Python module is built for CPython 3.10 only (cp310).
+requires-python = "==3.10.*"
+dependencies = [
+    "numpy",
+    "opencv-python",
+]
+
+[tool.uv]
+# Scripts only for now, not an installable package.
+package = false
