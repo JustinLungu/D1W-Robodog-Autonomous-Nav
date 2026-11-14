@@ -14,10 +14,33 @@ dependencies = [
 
 [project.scripts]
 robodog-status = "robodog.cli.status:main"
+robodog-dryrun = "robodog.cli.dryrun:main"
+robodog-depth = "robodog.cli.depth:main"
+
+# Computer vision extras. Pick ONE (they pull different PyTorch builds):
+#   uv sync --extra vision-cpu    # laptop without an NVIDIA GPU (small CPU-only PyTorch)
+#   uv sync --extra vision-gpu    # laptop with an NVIDIA GPU (CUDA PyTorch, ~3 GB download)
+[project.optional-dependencies]
+vision-cpu = ["torch>=2.4", "transformers>=4.56"]
+vision-gpu = ["torch>=2.4", "transformers>=4.56"]
 robodog-stand-test = "robodog.cli.stand_test:main"
 
 [dependency-groups]
 dev = ["pytest>=8"]
+
+[tool.uv]
+# The two vision extras use different PyTorch builds, so they can't be installed together.
+conflicts = [[{ extra = "vision-cpu" }, { extra = "vision-gpu" }]]
+
+# vision-cpu takes torch from PyTorch's CPU-only index; vision-gpu uses the default
+# PyPI build, which includes CUDA on Linux.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", extra = "vision-cpu" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [build-system]
 requires = ["hatchling"]
