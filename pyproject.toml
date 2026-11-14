@@ -14,6 +14,7 @@ dependencies = [
 
 [project.scripts]
 robodog-status = "robodog.cli.status:main"
+robodog-stand-test = "robodog.cli.stand_test:main"
 
 [dependency-groups]
 dev = ["pytest>=8"]
