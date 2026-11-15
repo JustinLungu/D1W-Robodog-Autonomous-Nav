@@ -21,6 +21,7 @@ distances, and drive with the teleop keys.
   HOLD    W/S A/D Q/E (arrows)   drive by hand, like robodog-teleop (overrides G)
   CLICK   R stand   F lie down   C clear goal   1/2/3 speed (hand driving)
           K  calibrate: click the bases of objects at the --calib-distances, in that order
+          O  (--obstacles) show / hide the obstacle check's marks on the picture
           [ ]  camera delay -/+ 0.05 s: turn the robot (A/D) and adjust until the goal ring stays
                on the object. Put the value in camera.latency_s
           SPACE  E-STOP (stop + lie down, latched)    Esc  lie down and quit
@@ -147,7 +148,8 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
         watcher = TrashWatcher(frames.get_stamped, tracker, csrt_max_s=cfg.trash.csrt_max_s)
     # Obstacle check (--obstacles): on the same camera stream. While it isn't sure the path is
     # clear, SafeDog refuses forward driving, and go-to pauses (the goal is kept).
-    obstacle_watcher, guard = None, None
+    obstacle_watcher, guard, ocfg = None, None, None
+    show_obstacles = True   # O toggles the obstacle marks on the picture
     if args.obstacles:
         if frames.reader is None:
             raise SystemExit("--obstacles needs a live camera or a video (--camera), not --image or the drawn floor")
@@ -156,7 +158,8 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
         from ..vision.watcher import ObstacleWatcher
 
         print("loading the depth model for the obstacle check...")
-        obstacle_watcher = ObstacleWatcher(None, from_settings(cfg.obstacles), camera=frames.reader)
+        ocfg = from_settings(cfg.obstacles)
+        obstacle_watcher = ObstacleWatcher(None, ocfg, camera=frames.reader)
         guard = ForwardGuard(obstacle_watcher)
         dog.forward_guard = guard.blocked
         print(f"obstacle check on ({obstacle_watcher.estimator.device}): FORWARD is blocked while something is "
@@ -227,6 +230,9 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
                         latency = round(max(0.0, latency + step_s), 2)
                         message = f"camera delay {latency:.2f} s (put it in camera.latency_s when the ring stays put)"
                         print(f"camera delay: latency_s: {latency:.2f}")
+                    elif ev.key == pg.K_o and obstacle_watcher is not None:
+                        show_obstacles = not show_obstacles
+                        message = "obstacle marks " + ("shown" if show_obstacles else "hidden (the check still runs)")
                     elif ev.key == pg.K_c:
                         goto.clear()
                         follower.drop()
@@ -360,8 +366,11 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
             seen_pose = history.at(frame_t - latency) or pose  # where the robot was when this picture was taken
             trash = None if watcher is None else (tracks, sightings, follower, trash_rate, now)
             obstacle = guard.check() if guard is not None else None
+            marks = None   # the obstacle check's newest verdict, to draw on the picture
+            if obstacle_watcher is not None and show_obstacles:
+                marks = (obstacle_watcher.latest()[0], ocfg)
             draw(screen, (big, mid, small), frame, scale, view_h, model, grid, goto, step, pose, seen_pose, tele,
-                 status, message, calibrating, last_click, drive_ok, fake, g_held, latency, trash, obstacle)
+                 status, message, calibrating, last_click, drive_ok, fake, g_held, latency, trash, obstacle, marks)
             clock.tick(RATE_HZ)
     finally:
         print("lying down and closing...")
@@ -374,11 +383,16 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
 
 
 def draw(screen, fonts, frame, scale, view_h, model, grid, goto, step, pose, seen_pose, tele, status, message,
-         calibrating, last_click, drive_ok, fake, g_held, latency, trash=None, obstacle=None):
+         calibrating, last_click, drive_ok, fake, g_held, latency, trash=None, obstacle=None, marks=None):
     import pygame as pg
 
     big, mid, small = fonts
     screen.fill(BG)
+    if frame is not None and marks is not None and marks[0] is not None:
+        # Obstacle check: path lines, yellow box, red (blocks) / orange / blue / green (the target).
+        # Its verdict belongs to a frame a few hundredths of a second older than this one.
+        from ..vision.obstacles import draw_overlay
+        frame = draw_overlay(frame, *marks)
     if frame is not None:
         rgb = cv2.cvtColor(cv2.resize(frame, (int(frame.shape[1] * scale), view_h)), cv2.COLOR_BGR2RGB)
         screen.blit(pg.surfarray.make_surface(rgb.swapaxes(0, 1)), (0, 0))
@@ -438,7 +452,7 @@ def draw(screen, fonts, frame, scale, view_h, model, grid, goto, step, pose, see
         title, col = "E-STOP" if "E-STOP" in tele.state().fault else "FAULT", RED
     elif not tele.standing:
         title, col = "LYING DOWN", DIM
-    elif step.state in ("turning", "driving"):
+    elif step.state in ("turning", "aligning", "driving"):
         title, col = f"GOING ({step.state})", GREEN
     else:
         title, col = "STANDING", BLUE
@@ -491,7 +505,7 @@ def draw(screen, fonts, frame, scale, view_h, model, grid, goto, step, pose, see
     screen.blit(small.render(msg[:120], True, RED if tele.state().fault else AMBER), (12, y))
     y += 22
     for h in ("CLICK floor/box = goal   HOLD G = go   HOLD WASD/QE = hand drive   R stand  F lie  C clear  K calibrate",
-              "[ ] camera delay -/+   SPACE e-stop   Esc quit   (window must have focus)"):
+              "[ ] camera delay -/+   O obstacle marks   SPACE e-stop   Esc quit   (window must have focus)"):
         screen.blit(small.render(h, True, DIM), (12, y))
         y += 18
     if not pg.key.get_focused():

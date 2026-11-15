@@ -42,6 +42,9 @@ class Sighting:
     conf: float
     floor: tuple[float, float] | None   # (X forward, Y left) from the robot's middle, None if not on the floor
     clipped: bool = False               # box cut off by the picture's edge: foot point not visible
+    bearing: float | None = None        # direction of the object from the robot's middle (rad, + = left).
+                                        # Also there when only the bottom is cut off; None if a side is
+    near_edge: bool = False             # its bottom is close to the picture's bottom: about to leave the view
 
 
 class TargetFollower:
@@ -72,6 +75,8 @@ class TargetFollower:
             return err
         self.track_id, self.label, self.conf = s.track_id, s.label, s.conf
         self.state, self.last_seen, self.updates, self.reacquired = "tracking", now, 0, 0
+        if s.bearing is not None:   # steer by where it's seen right from the start
+            self.goto.aim((pose_at_frame or pose)[2] + s.bearing)
         return None
 
     def drop(self):
@@ -106,6 +111,15 @@ class TargetFollower:
             self.updates += 1
         elif now - self.last_seen > self.lost_after_s:
             self.state = "blind"
+
+        # Centring. Its direction (the box's left-right position) is still right when only the
+        # bottom is cut off, so it keeps steering a little longer than the distance can.
+        aim = mine or next((s for s in sightings if s.track_id == self.track_id and s.bearing is not None), None)
+        if aim is not None and aim.bearing is not None:
+            # World heading of the object, as seen from where the robot was when the frame was taken.
+            self.goto.aim(pose_at_frame[2] + aim.bearing)
+            if aim.near_edge or aim.clipped:
+                self.goto.start_align()     # about to go blind: centre it first, standing still
         return self.state
 
     def tick(self, now: float) -> str:

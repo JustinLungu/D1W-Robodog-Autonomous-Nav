@@ -16,6 +16,15 @@ to ask SafeDog for:
 - Timeout, or the position estimate jumped -> stop and drop the goal.
 - Overshoot guard: we've commanded more forward driving than the goal needed (+ margin) -> stop,
   whatever the position estimate says. Catches a position estimate that doesn't follow reality.
+
+Going to a tracked object (target.py) adds two things, so it ends up centred:
+- aim(heading): the heading (IMU, world frame) the object was seen at. Steering then holds that
+  heading instead of pointing at the estimated goal position, which drifts sideways with the
+  position estimate. Each detection updates it; once the object is out of view it's simply held.
+- start_align(): the object is about to leave the picture (near its bottom edge): stop and turn on
+  the spot until the heading is within ALIGN_DEG of the aim, then drive the last, blind part.
+Small corrections are sent as pulses of the SDK's minimum turn rate (its average = the wanted
+rate) instead of being dropped: below MIN_YAW the robot ignores a turn command altogether.
 """
 
 from __future__ import annotations
@@ -35,6 +44,9 @@ FACE_DEG = 10.0         # when stopping short of a goal: turn until facing it wi
 JUMP_M = 0.5            # position estimate moved more than this in one step: don't trust it
 GUARD_FACTOR = 1.25     # overshoot guard: allow this much more driving than the straight line needs...
 GUARD_MARGIN_M = 0.40   # ...plus this, before stopping
+ALIGN_DEG = 1.0         # heading error below this counts as centred: no correction. 1 deg ~ 2 cm at
+                        # the last sighting (~1.3 m); much less and box jitter (~0.4 deg) makes it twitch
+PULSE_YAW = MIN_YAW * 1.2   # the turn rate small corrections are pulsed at (the SDK ignores less)
 ODOMETRIES = ("robot", "commanded")
 FINAL_STATES = ("arrived", "timeout", "lost position", "overshoot guard")
 
@@ -95,7 +107,7 @@ class GoToLimits:
 class GoToStep:
     vx: float
     yaw: float
-    state: str              # "no goal" | "paused" | "turning" | "driving" | one of FINAL_STATES
+    state: str              # "no goal" | "paused" | "turning" | "aligning" | "driving" | one of FINAL_STATES
     dist: float | None      # metres to the goal (from the robot's middle)
     bearing_deg: float | None  # where the goal is, relative to where the robot faces (+ = left)
 
@@ -115,6 +127,10 @@ class GoTo:
         self.commanded_m = 0.0     # forward driving we commanded (speed x time)
         self.robot_m = 0.0         # how far the robot's own estimate says it moved
         self.needed_m = 0.0        # straight-line driving the goal needed when it was set
+        self.aim_yaw: float | None = None  # heading to hold toward a tracked object (see aim())
+        self.aligning = False      # turning on the spot to the aim before the blind part
+        self.aligned = False       # the align was done (once per goal)
+        self._yaw_acc = 0.0        # pulse turning: wanted turn not yet sent
 
     # ------------------------------------------------------------------ goal
     def set_goal(self, local_x: float, local_y: float, pose: tuple[float, float, float],
@@ -139,7 +155,20 @@ class GoTo:
         self._last_vx = 0.0
         self.commanded_m = self.robot_m = 0.0
         self.needed_m = max(0.0, dist - max(self.lim.arrive_m, self.lim.stop_before_m))
+        self.aim_yaw, self.aligning, self.aligned, self._yaw_acc = None, False, False, 0.0
         return None
+
+    def aim(self, heading: float):
+        """Steer by this heading (world frame, IMU) instead of toward the goal point: where a tracked
+        object was seen. Held after it leaves the view. Ignored without a goal or after the end."""
+        if self.goal is not None and self.state not in FINAL_STATES:
+            self.aim_yaw = wrap(heading)
+
+    def start_align(self):
+        """The object is about to leave the picture: stop and turn to the aim before driving on
+        (once per goal). Needs aim() first."""
+        if self.goal is not None and self.aim_yaw is not None and not self.aligned and self.state not in FINAL_STATES:
+            self.aligning = True
 
     def refine_goal(self, local_x: float, local_y: float, pose: tuple[float, float, float], blend: float = 1.0):
         """Move the goal to a fresh measurement of where the target is, WITHOUT restarting the drive.
@@ -164,6 +193,7 @@ class GoTo:
     def clear(self):
         self.goal = None
         self.state = "no goal"
+        self.aim_yaw, self.aligning, self.aligned = None, False, False
 
     def nav_pose(self, robot_pose: tuple[float, float, float]) -> tuple[float, float, float]:
         """The pose go-to steers by: the robot's own, or our commanded count with the robot's heading."""
@@ -208,10 +238,12 @@ class GoTo:
         rel = self.relative(pose)
         dist = math.hypot(*rel)
         bearing = math.atan2(rel[1], rel[0])
+        # What we steer by: the aim heading (tracked object) if there is one, else the goal point.
+        steer = wrap(self.aim_yaw - pose[2]) if self.aim_yaw is not None else bearing
 
         stop = max(self.lim.arrive_m, self.lim.stop_before_m)
         close = dist <= stop
-        facing = abs(bearing) <= math.radians(FACE_DEG)
+        facing = abs(steer) <= math.radians(FACE_DEG)
         if (close and (facing or self.lim.stop_before_m <= self.lim.arrive_m)) or \
                 (dist <= PASSED_M and abs(bearing) > math.pi / 2):
             self.state = "arrived"
@@ -225,21 +257,41 @@ class GoTo:
             self.state = "timeout"
             return self._out(0.0, 0.0, pose)
 
-        yaw = max(-self.lim.max_yaw, min(self.lim.max_yaw, K_YAW * bearing))
-        if abs(bearing) > math.radians(TURN_FIRST_DEG) or close:
+        if self.aligning:
+            if abs(steer) > math.radians(ALIGN_DEG):
+                # About to go blind: centre the object first, standing still.
+                self.state = "aligning"
+                return self._out(0.0, self._turn(steer, dt), pose)
+            self.aligning, self.aligned = False, True
+
+        if abs(steer) > math.radians(TURN_FIRST_DEG) or close:
             # Turn on the spot (also: already close enough, just not facing the goal yet).
             # Keep at least the SDK's minimum turn rate, or it would stall.
             self.state = "turning"
-            yaw = math.copysign(max(abs(yaw), MIN_YAW * 1.2), bearing)
-            return self._out(0.0, yaw, pose)
+            yaw = max(-self.lim.max_yaw, min(self.lim.max_yaw, K_YAW * steer))
+            return self._out(0.0, math.copysign(max(abs(yaw), PULSE_YAW), steer), pose)
 
         self.state = "driving"
         vx = min(self.lim.max_vx, K_V * (dist - stop))
         vx = max(vx, MIN_VX * 1.2)        # below the SDK minimum the robot wouldn't move at all
-        if abs(yaw) < MIN_YAW:
-            yaw = 0.0                      # tiny corrections: the SDK ignores them anyway
         self._last_vx = vx
-        return self._out(vx, yaw, pose)
+        return self._out(vx, self._turn(steer, dt), pose)
+
+    def _turn(self, err: float, dt: float) -> float:
+        """Turn rate for a heading error. Within ALIGN_DEG: none. Below the SDK minimum: pulses of
+        PULSE_YAW whose average is the wanted rate (the robot smooths them out), instead of 0."""
+        if abs(err) <= math.radians(ALIGN_DEG):
+            self._yaw_acc = 0.0
+            return 0.0
+        want = max(-self.lim.max_yaw, min(self.lim.max_yaw, K_YAW * err))
+        if abs(want) >= PULSE_YAW:
+            self._yaw_acc = 0.0
+            return want
+        self._yaw_acc += want * dt          # owed turning, sent as whole pulses
+        if abs(self._yaw_acc) >= PULSE_YAW * dt:
+            self._yaw_acc -= math.copysign(PULSE_YAW * dt, want)
+            return math.copysign(PULSE_YAW, want)
+        return 0.0
 
     def _out(self, vx: float, yaw: float, pose) -> GoToStep:
         rel = self.relative(pose)

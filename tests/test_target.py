@@ -182,3 +182,94 @@ def test_drives_to_the_real_object_despite_drifting_odometry_and_a_bad_first_cli
     blind, tracked = approach(False), approach(True)
     assert tracked < 0.30, tracked          # ends within arrive distance + the blind last stretch's drift
     assert tracked < blind - 0.15, (tracked, blind)
+
+
+# --- centring: aim heading, align before going blind, pulse turning --------------------
+
+def centred_approach(use_bearing: bool, drift: float, obj=(2.4, 0.35)):
+    """Odometry drifts SIDEWAYS (`drift` m per metre) and under-reports 10 %; the IMU heading is right.
+    The camera sees the object until it's within 1.3 m of the robot's middle (~0.9 m from the
+    camera), with its bottom in the lowest 12 % of the picture from 1.6 m on.
+    Returns how far the object ends up from the robot's centre line (m), and the final state."""
+    g = GoTo(GoToLimits(max_goal_m=3.0, max_vx=0.15, max_yaw=0.3, arrive_m=0.10, timeout_s=120.0,
+                        stop_before_m=0.55))
+    f = TargetFollower(g, lost_after_s=1.0, reacquire_m=0.4, blend=0.5)
+    true, odo = [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]
+
+    def sighting():
+        dx, dy = obj[0] - true[0], obj[1] - true[1]
+        rel = (dx * math.cos(true[2]) + dy * math.sin(true[2]), -dx * math.sin(true[2]) + dy * math.cos(true[2]))
+        bearing = math.atan2(rel[1], rel[0]) if use_bearing else None
+        return Sighting(1, "cup", 0.6, rel, False, bearing, rel[0] < 1.6), rel
+
+    f.select(sighting()[0], tuple(odo), 0.0)
+    t, s = 0.0, None
+    for i in range(int(120 / DT)):
+        t += DT
+        if i % 6 == 0:                                       # detector at 5 Hz
+            sg, rel = sighting()
+            visible = rel[0] > 1.3 and abs(math.atan2(rel[1], rel[0])) < math.radians(45)
+            f.update([sg] if visible else [], tuple(odo), t)
+        s = g.step(tuple(odo), True, DT)
+        if s.state in ("arrived", "timeout", "overshoot guard", "lost position"):
+            break
+        true[0] += s.vx * math.cos(true[2]) * DT; true[1] += s.vx * math.sin(true[2]) * DT
+        true[2] = wrap(true[2] + s.yaw * DT)
+        odo[0] += 0.9 * s.vx * math.cos(odo[2]) * DT; odo[1] += 0.9 * s.vx * math.sin(odo[2]) * DT
+        odo[1] += drift * s.vx * DT                          # sideways drift of the position estimate
+        odo[2] = wrap(odo[2] + s.yaw * DT)
+    dx, dy = obj[0] - true[0], obj[1] - true[1]
+    off_line = -dx * math.sin(true[2]) + dy * math.cos(true[2])   # object's offset from the centre line
+    return off_line, s.state
+
+
+@pytest.mark.parametrize("drift", [0.0, 0.1, 0.2])
+def test_steering_by_the_seen_heading_ends_centred_whatever_the_drift(drift):
+    off, state = centred_approach(use_bearing=True, drift=drift)
+    assert state == "arrived"
+    assert abs(off) < 0.03, off      # within 3 cm of the centre line (1 deg dead zone at ~1.3 m)
+
+
+def test_steering_by_the_goal_point_drifts_off_with_the_position_estimate():
+    old, _ = centred_approach(use_bearing=False, drift=0.2)
+    new, _ = centred_approach(use_bearing=True, drift=0.2)
+    assert abs(old) > 0.08 and abs(new) < abs(old) / 2, (old, new)
+
+
+def test_aligns_on_the_spot_before_going_blind():
+    g = GoTo(LIM)
+    f = TargetFollower(g, lost_after_s=1.0, reacquire_m=0.4, blend=1.0)
+    pose = (0.0, 0.0, 0.0)
+    f.select(Sighting(1, "cup", 0.6, (1.5, 0.08), False, math.atan2(0.08, 1.5)), pose, 0.0)
+    f.update([Sighting(1, "cup", 0.6, (1.5, 0.08), False, math.atan2(0.08, 1.5), near_edge=True)], pose, 0.1)
+    first = [g.step(pose, True, DT) for _ in range(10)]
+    assert all(s.state == "aligning" and s.vx == 0.0 and s.yaw >= 0 for s in first)  # stands still,
+    assert any(s.yaw > 0 for s in first)                                              # turns left to it
+    yaw = 0.0
+    for _ in range(200):
+        s = g.step((0.0, 0.0, yaw), True, DT)
+        if s.state != "aligning":
+            break
+        yaw += s.yaw * DT
+    assert s.state == "driving" and g.aligned
+    assert abs(math.degrees(wrap(math.atan2(0.08, 1.5) - yaw))) <= 1.0
+
+
+def test_bearing_survives_a_box_cut_off_only_at_the_bottom():
+    g, f = make()
+    pose = (0.0, 0.0, 0.0)
+    f.select(Sighting(1, "cup", 0.6, (1.5, 0.0), False, 0.0), pose, 0.0)
+    f.update([Sighting(1, "cup", 0.6, (1.0, 0.1), True, math.radians(5))], pose, 0.1)  # bottom cut off
+    assert g.aim_yaw == pytest.approx(math.radians(5)) and g.aligning
+
+
+def test_small_corrections_are_pulsed_not_dropped():
+    g = GoTo(LIM)
+    g.set_goal(2.0, 0.0, (0.0, 0.0, 0.0))
+    g.aim(math.radians(3))                       # 3 deg off: wanted 0.08 rad/s, below the SDK minimum
+    rates = [g.step((0.0, 0.0, 0.0), True, DT).yaw for _ in range(60)]
+    from robodog.goto import PULSE_YAW
+    assert set(round(r, 6) for r in rates) <= {0.0, round(PULSE_YAW, 6)}   # only 0 or the minimum rate
+    assert sum(rates) * DT == pytest.approx(1.5 * math.radians(3) * 60 * DT, rel=0.1)   # average = wanted
+    g.aim(math.radians(0.8))                     # within ALIGN_DEG: left alone
+    assert all(g.step((0.0, 0.0, 0.0), True, DT).yaw == 0.0 for _ in range(30))

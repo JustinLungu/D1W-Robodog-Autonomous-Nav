@@ -181,17 +181,26 @@ def camera_for(cam_cfg, width: int, height: int, posture: str = "stand",
                        cam_cfg.forward_offset_m, lens or cam_cfg.lens)
 
 
+NEAR_EDGE = 0.12   # box bottom within this fraction of the picture's bottom edge: about to leave the view
+
+
 def to_sighting(t: Track, model: CameraModel, edge_px: float | None = None) -> Sighting:
     """Where a tracked box stands on the floor: its bottom-centre, through the camera model.
 
     `clipped` = the box touches the picture's bottom or side edge: the object continues outside
     the picture, so its real foot point isn't visible and the distance would be wrong.
+    `bearing` = its direction from the robot's middle. Only the box's left-right position matters
+    for that, so it's kept when just the bottom is cut off (not when a side is).
+    `near_edge` = its bottom is in the lowest NEAR_EDGE of the picture: go-to centres it now.
     """
     x0, y0, x1, y1 = t.box
     edge = model.height * 0.01 if edge_px is None else edge_px
-    clipped = y1 >= model.height - 1 - edge or x0 <= edge or x1 >= model.width - 1 - edge
+    side_clipped = x0 <= edge or x1 >= model.width - 1 - edge
+    clipped = y1 >= model.height - 1 - edge or side_clipped
     floor = model.pixel_to_floor((x0 + x1) / 2, min(y1, model.height - 1))
-    return Sighting(t.track_id, t.label, t.conf, floor, clipped)
+    bearing = None if floor is None or side_clipped else math.atan2(floor[1], floor[0])
+    near_edge = y1 >= model.height * (1 - NEAR_EDGE)
+    return Sighting(t.track_id, t.label, t.conf, floor, clipped, bearing, near_edge)
 
 
 def camera_distance(model: CameraModel, floor: tuple[float, float]) -> float:
