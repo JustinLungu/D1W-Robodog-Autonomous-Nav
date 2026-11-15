@@ -315,6 +315,13 @@ Restart `robodog-goto --allow-motion`, **R**. Objects at **2.0 m** straight ahea
 
 **Pass:** within ~10 % of the tape. Then set `camera.measured: true` in `config.local.yaml`.
 
+### Test 20b: Camera delay
+1. `robodog-goto --allow-motion`, **R**. Put a can ~2 m ahead and click its base (ring on the can).
+2. Hold **D** for ~1 s, let go, hold **A** for ~1 s. **Watch the ring:** if it swings ahead of the turn and then slides back onto the can, the delay is too small: press **]**. If it lags behind the can, press **[**. The panel shows `camera delay .. s`.
+3. When the ring stays on the can during and after the turn, put the value printed in the terminal (`latency_s: ..`) in the camera section of `config.local.yaml`.
+
+**Pass:** ring stays within a can's width of the can while turning. From now on, clicking while the robot moves puts the goal in the right place.
+
 ### Test 21: First go-to (1 m straight ahead)
 1. `robodog-goto --allow-motion`, **R**, wait.
 2. Click a floor spot about **1 m** straight ahead (put a piece of tape there).

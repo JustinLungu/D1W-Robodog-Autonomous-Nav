@@ -20,7 +20,9 @@ to ask SafeDog for:
 
 from __future__ import annotations
 
+import bisect
 import math
+from collections import deque
 from dataclasses import dataclass
 
 from .safety import MIN_VX, MIN_YAW
@@ -40,6 +42,42 @@ FINAL_STATES = ("arrived", "timeout", "lost position", "overshoot guard")
 def wrap(a: float) -> float:
     """Angle in radians, wrapped to [-pi, pi]."""
     return (a + math.pi) % (2 * math.pi) - math.pi
+
+
+class PoseHistory:
+    """Recent robot poses with the time they were read, to look up where the robot WAS.
+
+    The camera picture arrives late (encoding + Wi-Fi + decoding). A click on it must be turned
+    into a goal using the pose the robot had when that picture was taken, not the pose now,
+    or a robot that's turning puts the goal in the wrong place.
+    """
+
+    def __init__(self, keep_s: float = 3.0):
+        self.keep_s = keep_s
+        self._t: deque[float] = deque()
+        self._p: deque[tuple[float, float, float]] = deque()
+
+    def add(self, t: float, pose: tuple[float, float, float]):
+        self._t.append(t)
+        self._p.append(pose)
+        while self._t and self._t[0] < t - self.keep_s:
+            self._t.popleft()
+            self._p.popleft()
+
+    def at(self, t: float) -> tuple[float, float, float] | None:
+        """Pose at time t, interpolated between the two nearest samples (clamped to the oldest/newest)."""
+        if not self._t:
+            return None
+        ts = list(self._t)
+        i = bisect.bisect_left(ts, t)
+        if i == 0:
+            return self._p[0]
+        if i == len(ts):
+            return self._p[-1]
+        t0, t1 = ts[i - 1], ts[i]
+        (x0, y0, a0), (x1, y1, a1) = self._p[i - 1], self._p[i]
+        k = (t - t0) / (t1 - t0) if t1 > t0 else 1.0
+        return x0 + k * (x1 - x0), y0 + k * (y1 - y0), wrap(a0 + k * wrap(a1 - a0))
 
 
 @dataclass
@@ -79,15 +117,22 @@ class GoTo:
         self.needed_m = 0.0        # straight-line driving the goal needed when it was set
 
     # ------------------------------------------------------------------ goal
-    def set_goal(self, local_x: float, local_y: float, pose: tuple[float, float, float]) -> str | None:
-        """Set a goal given relative to the robot's middle (X forward, Y left). Returns an error, or None."""
-        dist = math.hypot(local_x, local_y)
+    def set_goal(self, local_x: float, local_y: float, pose: tuple[float, float, float],
+                 seen_pose: tuple[float, float, float] | None = None) -> str | None:
+        """Set a goal given relative to the robot's middle (X forward, Y left). Returns an error, or None.
+
+        pose: the robot's pose now. seen_pose: its pose when the camera picture was taken (the
+        goal is relative to THAT); defaults to pose.
+        """
+        seen = seen_pose or pose
+        x, y, yaw = seen
+        gx = x + local_x * math.cos(yaw) - local_y * math.sin(yaw)
+        gy = y + local_x * math.sin(yaw) + local_y * math.cos(yaw)
+        dist = math.hypot(gx - pose[0], gy - pose[1])
         if dist > self.lim.max_goal_m:
             return f"goal {dist:.1f} m away: too far (max {self.lim.max_goal_m:.1f} m)"
-        self._own_xy = (pose[0], pose[1])
-        x, y, yaw = self.nav_pose(pose)
-        self.goal = (x + local_x * math.cos(yaw) - local_y * math.sin(yaw),
-                     y + local_x * math.sin(yaw) + local_y * math.cos(yaw))
+        self._own_xy = (pose[0], pose[1])  # our own count ("commanded") starts at the robot's position now
+        self.goal = (gx, gy)
         self.state = "paused"
         self._drive_time = 0.0
         self._last_pose = None

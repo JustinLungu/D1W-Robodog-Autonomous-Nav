@@ -21,6 +21,8 @@ distances, and drive with the teleop keys.
   HOLD    W/S A/D Q/E (arrows)   drive by hand, like robodog-teleop (overrides G)
   CLICK   R stand   F lie down   C clear goal   1/2/3 speed (hand driving)
           K  calibrate: click the bases of objects at the --calib-distances, in that order
+          [ ]  camera delay -/+ 0.05 s: turn the robot (A/D) and adjust until the goal ring stays
+               on the object. Put the value in camera.latency_s
           SPACE  E-STOP (stop + lie down, latched)    Esc  lie down and quit
 
 The window must have focus: clicking another window stops the robot.
@@ -38,8 +40,8 @@ import numpy as np
 
 from ..camera_model import CameraModel, fit_camera
 from ..config import REPO_ROOT, load_config
-from ..goto import GoTo, GoToLimits
-from ..target import PoseHistory, TargetFollower
+from ..goto import GoTo, GoToLimits, PoseHistory
+from ..target import TargetFollower
 from ..safety import SafeDog, SafetyError
 from ..teleop import Teleop
 from .status import MODES
@@ -82,7 +84,6 @@ class Frames:
     def __init__(self, source: str | None, image: str | None):
         self.reader = None
         self.still = None
-        self._still_stamp = time.monotonic()
         if image:
             self.still = cv2.imread(image)
             if self.still is None:
@@ -102,9 +103,10 @@ class Frames:
         return self.get_stamped()[0]
 
     def get_stamped(self) -> tuple[np.ndarray | None, float, int]:
-        """(frame, time it arrived (time.monotonic), sequence number). A still image never changes."""
+        """(frame, time it arrived (time.monotonic), sequence number). A still image never changes
+        and doesn't lag: it counts as arriving now."""
         if self.still is not None:
-            return self.still, self._still_stamp, 1
+            return self.still, time.monotonic(), 1
         return self.reader.get()
 
     def close(self):
@@ -126,8 +128,8 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
     # Trash tracking (--trash): a detector thread on the camera, and the goal locked onto one piece.
     watcher = None
     follower = TargetFollower(goto, cfg.trash.lost_after_s, cfg.trash.reacquire_m)
-    history = PoseHistory()
     tracks, sightings, trash_seq, trash_rate = [], [], 0, 0.0
+    trash_pose = None   # robot pose when the frame of the newest detector result was taken
     if tracker is not None:
         from ..vision.trash import TrashWatcher, to_sighting
 
@@ -179,6 +181,11 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
     last = time.monotonic()
     next_log = 0.0
     pose = (0.0, 0.0, 0.0)
+    # The picture is late: remember recent poses, so a click (and the drawn goal) uses where the
+    # robot was when the picture was taken. A still image / drawn floor doesn't lag.
+    history = PoseHistory()
+    latency = cam_cfg.latency_s if frames.reader else 0.0
+    frame, frame_t = None, time.monotonic()
 
     try:
         while not tele.quit:
@@ -188,6 +195,11 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
                 elif ev.type == pg.KEYDOWN:
                     if ev.key in click_keys:
                         tele.action(click_keys[ev.key])
+                    elif ev.key in (pg.K_LEFTBRACKET, pg.K_RIGHTBRACKET):
+                        step_s = 0.05 if ev.key == pg.K_RIGHTBRACKET else -0.05
+                        latency = round(max(0.0, latency + step_s), 2)
+                        message = f"camera delay {latency:.2f} s (put it in camera.latency_s when the ring stays put)"
+                        print(f"camera delay: latency_s: {latency:.2f}")
                     elif ev.key == pg.K_c:
                         goto.clear()
                         follower.drop()
@@ -229,7 +241,7 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
                         if not drive_ok:
                             message = f"#{t.track_id} {t.label}: camera not measured, can't go there"
                             continue
-                        err = follower.select(sg, pose, time.monotonic())
+                        err = follower.select(sg, pose, time.monotonic(), trash_pose)
                         if err:
                             message = f"#{t.track_id} {t.label}: {err}"
                         else:
@@ -247,7 +259,7 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
                         message = (f"floor point: {from_cam:.2f} m from under the camera "
                                    f"({pt[0]:.2f} m ahead of the robot's middle, {pt[1]:+.2f} m left)")
                         continue
-                    err = goto.set_goal(pt[0], pt[1], pose)
+                    err = goto.set_goal(pt[0], pt[1], pose, history.at(frame_t - latency))
                     message = err or f"goal: {from_cam:.2f} m from under the camera. Hold G to go"
 
             focused = pg.key.get_focused()
@@ -271,8 +283,8 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
                     trash_seq, tracks = seq, new_tracks
                     sightings = [to_sighting(t, model) for t in tracks]
                     # The frame is old by the time it's analysed: use the pose the robot had back then.
-                    pose_then = history.at(stamp - cfg.trash.camera_delay_s) or pose
-                    follower.update(sightings, pose_then, now)
+                    trash_pose = history.at(stamp - latency) or pose
+                    follower.update(sightings, trash_pose, now)
                 follower.tick(now)
                 if watcher.error:
                     message = watcher.error
@@ -305,9 +317,13 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
                 except Exception:
                     status = {}
 
+            new_frame, new_t, _ = frames.get_stamped()
+            if new_frame is not None:
+                frame, frame_t = new_frame, new_t
+            seen_pose = history.at(frame_t - latency) or pose  # where the robot was when this picture was taken
             trash = None if watcher is None else (tracks, sightings, follower, trash_rate, now)
-            draw(screen, (big, mid, small), frames.get(), scale, view_h, model, grid, goto, step, pose, tele,
-                 status, message, calibrating, last_click, drive_ok, fake, g_held, trash)
+            draw(screen, (big, mid, small), frame, scale, view_h, model, grid, goto, step, pose, seen_pose, tele,
+                 status, message, calibrating, last_click, drive_ok, fake, g_held, latency, trash)
             clock.tick(RATE_HZ)
     finally:
         print("lying down and closing...")
@@ -317,8 +333,8 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
         pg.quit()
 
 
-def draw(screen, fonts, frame, scale, view_h, model, grid, goto, step, pose, tele, status, message,
-         calibrating, last_click, drive_ok, fake, g_held, trash=None):
+def draw(screen, fonts, frame, scale, view_h, model, grid, goto, step, pose, seen_pose, tele, status, message,
+         calibrating, last_click, drive_ok, fake, g_held, latency, trash=None):
     import pygame as pg
 
     big, mid, small = fonts
@@ -360,9 +376,9 @@ def draw(screen, fonts, frame, scale, view_h, model, grid, goto, step, pose, tel
             lab = small.render(f"#{t.track_id} {t.label} {t.conf:.2f}  {dist}", True, (0, 0, 0), col)
             screen.blit(lab, (x0, y0 - lab.get_height() if y0 > lab.get_height() else y1))
 
-    # The goal, re-projected from the robot's position estimate every frame. If it slides off
-    # the real spot while driving, the geometry or the odometry is off.
-    rel = goto.relative(pose)
+    # The goal, re-projected every frame from where the robot was when the picture was taken (the
+    # picture is late). If it slides off the real spot, the camera delay, geometry or odometry is off.
+    rel = goto.relative(seen_pose)
     if rel is not None:
         uv = model.floor_to_pixel(*rel)
         col = {"arrived": GREEN, "timeout": RED, "lost position": RED}.get(step.state, AMBER)
@@ -394,7 +410,8 @@ def draw(screen, fonts, frame, scale, view_h, model, grid, goto, step, pose, tel
     batt, mode = status.get("battery"), status.get("mode")
     x, yy, yaw = pose
     screen.blit(mid.render(f"battery {batt}%   mode {mode} ({MODES.get(mode, '?')})   "
-                           f"pose x {x:+.2f} y {yy:+.2f} m, heading {math.degrees(yaw):+.0f} deg", True, FG), (12, y))
+                           f"pose x {x:+.2f} y {yy:+.2f} m, heading {math.degrees(yaw):+.0f} deg   "
+                           f"camera delay {latency:.2f} s", True, FG), (12, y))
     y += 24
     if step.dist is not None:
         rel = goto.relative(pose)
@@ -426,7 +443,7 @@ def draw(screen, fonts, frame, scale, view_h, model, grid, goto, step, pose, tel
     screen.blit(small.render(msg[:120], True, RED if tele.state().fault else AMBER), (12, y))
     y += 22
     for h in ("CLICK floor/box = goal   HOLD G = go   HOLD WASD/QE = hand drive   R stand  F lie  C clear  K calibrate",
-              "SPACE e-stop   Esc quit   (window must have focus)"):
+              "[ ] camera delay -/+   SPACE e-stop   Esc quit   (window must have focus)"):
         screen.blit(small.render(h, True, DIM), (12, y))
         y += 18
     if not pg.key.get_focused():

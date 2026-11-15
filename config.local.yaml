@@ -30,6 +30,8 @@ camera:
   pitch_deg: -8.7         # fitted with K: looking 8.7 deg up
   forward_offset_m: 0.4        # measured: lens in front of the robot's centre
   measured: true          # set true once the three values above are real: go-to driving needs it
+  latency_s: 0.3          # how late the picture arrives (s). Clicks use where the robot was that long ago.
+                          # Tune in robodog-goto with [ and ]: the goal ring should stay on the object while turning
 
 goto:
   max_goal_m: 3.0          # refuse clicked goals further away than this
@@ -59,7 +61,6 @@ trash:
                          # (An existing track is continued with weaker detections too, down to 0.1.)
   imgsz: 896             # detector input size (this model was trained at 896). 640 is ~2x faster
   follow_vx: 0.10        # m/s while driving to a tracked piece: slow, so the tracker keeps up
-  camera_delay_s: 0.3    # how old a camera frame is when it arrives (camera + Wi-Fi)
   lost_after_s: 1.0      # not seen for this long -> finish blind, on odometry
   reacquire_m: 0.4       # the tracker renamed the piece: a track this close to the goal is taken as the same
 

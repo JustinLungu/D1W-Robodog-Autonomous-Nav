@@ -4,7 +4,7 @@ import math
 
 import pytest
 
-from robodog.goto import GoTo, GoToLimits, wrap
+from robodog.goto import GoTo, GoToLimits, PoseHistory, wrap
 from robodog.safety import MIN_VX, MIN_YAW
 
 DT = 1 / 30
@@ -220,3 +220,42 @@ def test_guard_never_trips_on_a_normal_run():
 def test_unknown_odometry_rejected():
     with pytest.raises(ValueError):
         GoTo(GoToLimits(3.0, 0.15, 0.3, 0.10, 20.0, odometry="gps"))
+
+
+# ---------------------------------------------------------------- late camera picture
+def test_pose_history_interpolates_including_heading_across_the_wrap():
+    h = PoseHistory()
+    h.add(0.0, (0.0, 0.0, math.radians(170)))
+    h.add(1.0, (1.0, 2.0, math.radians(-170)))
+    x, y, yaw = h.at(0.5)
+    assert (x, y) == pytest.approx((0.5, 1.0))
+    assert abs(wrap(yaw - math.pi)) < 1e-9          # halfway through +170 -> -170 is 180, not 0
+    assert h.at(-5.0) == (0.0, 0.0, math.radians(170))   # older than kept: oldest
+    assert h.at(9.0) == (1.0, 2.0, math.radians(-170))   # newer: newest
+    assert PoseHistory().at(1.0) is None
+
+
+def test_pose_history_forgets_old_poses():
+    h = PoseHistory(keep_s=1.0)
+    for i in range(50):
+        h.add(i * 0.1, (i, 0.0, 0.0))
+    assert h.at(0.0)[0] >= 39   # only the last second is kept
+
+
+def test_click_on_a_late_picture_uses_where_the_robot_was():
+    # The robot has turned 90 deg left since the picture was taken. The object straight ahead
+    # in the picture is now on its right.
+    g = GoTo(LIM)
+    assert g.set_goal(2.0, 0.0, pose=(0.0, 0.0, math.pi / 2), seen_pose=(0.0, 0.0, 0.0)) is None
+    assert g.goal == pytest.approx((2.0, 0.0))
+    rel = g.relative((0.0, 0.0, math.pi / 2))
+    assert rel == pytest.approx((0.0, -2.0), abs=1e-9)
+
+
+def test_late_picture_distance_checked_from_where_the_robot_is_now():
+    g = GoTo(LIM)
+    # In the picture the goal was 2.5 m ahead, but the robot has driven 1 m toward it since: 1.5 m left.
+    assert g.set_goal(2.5, 0.0, pose=(1.0, 0.0, 0.0), seen_pose=(0.0, 0.0, 0.0)) is None
+    assert g.needed_m == pytest.approx(1.5 - LIM.arrive_m)
+    # And the other way: driven 1 m away from it, 3.5 m > max 3 m.
+    assert "too far" in GoTo(LIM).set_goal(2.5, 0.0, pose=(-1.0, 0.0, 0.0), seen_pose=(0.0, 0.0, 0.0))

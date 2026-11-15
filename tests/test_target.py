@@ -5,7 +5,7 @@ import math
 import pytest
 
 from robodog.goto import GoTo, GoToLimits, wrap
-from robodog.target import PoseHistory, Sighting, TargetFollower
+from robodog.target import Sighting, TargetFollower
 
 DT = 1 / 30
 LIM = GoToLimits(max_goal_m=3.0, max_vx=0.15, max_yaw=0.3, arrive_m=0.10, timeout_s=120.0)
@@ -147,16 +147,6 @@ def test_old_frames_are_placed_with_the_pose_the_robot_had_then():
     f.update([see(5, (2.0, 0.0), then)], then, now=0.3)
     assert g.goal == pytest.approx((2.0, 0.0))
     assert g.relative(now_pose)[0] == pytest.approx(1.7)
-
-
-def test_pose_history_returns_the_pose_closest_in_time():
-    h = PoseHistory(keep_s=1.0)
-    assert h.at(0.0) is None
-    for i in range(10):
-        h.add(i * 0.1, (float(i), 0.0, 0.0))
-    assert h.at(0.42)[0] == 4.0 and h.at(99.0)[0] == 9.0
-    h.add(5.0, (50.0, 0.0, 0.0))                                # older entries are dropped
-    assert h.at(0.0)[0] == 50.0
 
 
 # --- the whole approach, simulated -----------------------------------------------------

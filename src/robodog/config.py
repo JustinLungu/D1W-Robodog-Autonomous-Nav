@@ -72,6 +72,7 @@ class CameraConfig:
     pitch_deg: float         # downward tilt of the lens
     forward_offset_m: float  # lens distance in front of the robot's centre
     measured: bool           # false until height/offset are measured and pitch calibrated
+    latency_s: float         # how late the picture arrives: clicks use the robot's pose from that long ago
 
 
 @dataclass
@@ -94,7 +95,6 @@ class TrashConfig:
     conf: float              # confidence needed to START tracking a piece (0-1)
     imgsz: int               # detector input size in pixels (bigger = finds smaller things, slower)
     follow_vx: float         # m/s while driving to a tracked target (slow, so the tracker keeps up)
-    camera_delay_s: float    # how old a camera frame is when it reaches the laptop
     lost_after_s: float      # not seen for this long -> drive on blind (odometry only)
     reacquire_m: float       # a new track this close to the goal is taken as the same object
 

@@ -29,7 +29,6 @@ Details that matter
 from __future__ import annotations
 
 import math
-from collections import deque
 from dataclasses import dataclass
 
 from .goto import GoTo
@@ -43,25 +42,6 @@ class Sighting:
     conf: float
     floor: tuple[float, float] | None   # (X forward, Y left) from the robot's middle, None if not on the floor
     clipped: bool = False               # box cut off by the picture's edge: foot point not visible
-
-
-class PoseHistory:
-    """Recent robot poses, to look up where the robot was when a camera frame was taken."""
-
-    def __init__(self, keep_s: float = 3.0):
-        self.keep_s = keep_s
-        self._buf: deque[tuple[float, tuple[float, float, float]]] = deque()
-
-    def add(self, t: float, pose: tuple[float, float, float]):
-        self._buf.append((t, pose))
-        while self._buf and t - self._buf[0][0] > self.keep_s:
-            self._buf.popleft()
-
-    def at(self, t: float) -> tuple[float, float, float] | None:
-        """The stored pose closest in time to t (None if nothing stored yet)."""
-        if not self._buf:
-            return None
-        return min(self._buf, key=lambda e: abs(e[0] - t))[1]
 
 
 class TargetFollower:
@@ -79,11 +59,15 @@ class TargetFollower:
         self.reacquired = 0       # how many times we switched to a new track ID
 
     # ------------------------------------------------------------------ select / drop
-    def select(self, s: Sighting, pose: tuple[float, float, float], now: float) -> str | None:
-        """Make this object the go-to goal. Returns an error text, or None."""
+    def select(self, s: Sighting, pose: tuple[float, float, float], now: float,
+               pose_at_frame: tuple[float, float, float] | None = None) -> str | None:
+        """Make this object the go-to goal. Returns an error text, or None.
+
+        pose: the robot's pose now. pose_at_frame: its pose when the sighting's frame was taken.
+        """
         if s.floor is None or s.clipped:
             return "can't place that object on the floor (cut off by the picture's edge or above the horizon)"
-        err = self.goto.set_goal(s.floor[0], s.floor[1], pose)
+        err = self.goto.set_goal(s.floor[0], s.floor[1], pose, pose_at_frame)
         if err:
             return err
         self.track_id, self.label, self.conf = s.track_id, s.label, s.conf

@@ -373,8 +373,9 @@ How it works:
 1. **Click → floor point.** From the camera's height, tilt and lens ([camera_model.py](src/robodog/camera_model.py)) the clicked pixel becomes e.g. "1.51 m ahead, 0.51 m left". Clicks at or above the horizon are refused (not floor).
 2. **The goal is stored in the robot's own position frame** (`getPosition()` + heading), so it stays put while the robot moves, also after it has slid out of view under the robot's nose.
 3. **Hold G:** turn on the spot if the goal is more than 25° off, otherwise drive and steer toward it, slow down near it ([goto.py](src/robodog/goto.py)). It **stops short, facing the goal**: the robot's middle stops `stop_before_m` (0.55 m) before the clicked point, so with the lens 0.40 m in front of the middle, the **nose ends ~15 cm in front of the object** instead of driving over it. `stop_before_m: 0` drives the middle onto the point (within `arrive_m`, 10 cm).
-4. **The window redraws the goal from the position estimate every frame.** If the ring slides off the real spot while driving, the geometry or the odometry is off.
-5. **Cyan arcs on the floor** mark 0.5 / 1 / 1.5 / 2 / 3 m **from the point under the camera** (how you measure with a tape): if the camera values are right, a tape measure agrees with them. All distances shown in the window count from there too; internally the robot steers its middle (0.40 m behind the lens).
+4. **The picture arrives late** (~0.3 s: encoding + Wi-Fi + decoding) while the robot reacts at once. So go-to keeps the last 3 s of robot poses, and a click is turned into a goal using **where the robot was when that picture was taken** (`camera.latency_s` ago), not where it is now. Otherwise a click while the robot turns lands the goal far off.
+5. **The window redraws the goal every frame** from the pose at the picture's time, so the ring stays on the object in the (late) video. If the ring slides off the real spot, the camera delay, the geometry or the odometry is off. **Tune the delay** with **[** / **]** (−/+ 0.05 s): turn the robot on the spot (A/D) with a goal set, and adjust until the ring stays on the object instead of swinging ahead and back. Put the value in `camera.latency_s`.
+6. **Cyan arcs on the floor** mark 0.5 / 1 / 1.5 / 2 / 3 m **from the point under the camera** (how you measure with a tape): if the camera values are right, a tape measure agrees with them. All distances shown in the window count from there too; internally the robot steers its middle (0.40 m behind the lens).
 
 | Key | |
 |---|---|
@@ -383,6 +384,7 @@ How it works:
 | **hold W/S A/D Q/E** | drive by hand, like teleop (overrides G) |
 | **R** / **F** / **H** | stand / lie down / handshake |
 | **C** | clear the goal |
+| **[** / **]** | camera delay −/+ 0.05 s (see 5. above) |
 | **K** | calibrate: click the bases of objects at the `--calib-distances` (default `1.5,2.5,3.0` m, measured on the floor from the point under the lens), in that order |
 | **SPACE** / **Esc** | e-stop / lie down and quit |
 
@@ -527,7 +529,7 @@ The go-to window (§6.7) then shows the tracked boxes. **Click a box** and **hol
 2. **When the piece leaves the view** (cut off by the picture's edge, or not seen for `trash.lost_after_s`), correcting stops and the robot **finishes on odometry**, exactly like a plain clicked goal: the panel shows `OUT OF VIEW ... finishing on odometry`. It stops as go-to always does (`goto.stop_before_m`).
 3. If the tracker gives the piece a new ID, a track within `trash.reacquire_m` (0.4 m) of the goal is taken as the same piece.
 
-Each detection is placed using the pose the robot had when that frame was taken (`trash.camera_delay_s` ago), so the robot's own movement in between cancels out. Clicking the floor instead of a box still sets an ordinary fixed goal.
+Each detection is placed using the pose the robot had when that frame was taken (`camera.latency_s` ago; tune it with **[** / **]**, §6.7), so the robot's own movement in between cancels out. Clicking the floor instead of a box still sets an ordinary fixed goal.
 
 `--posture` only sets the **camera height used for distances**; it does not make the robot crawl. The SDK's `crawl()` had no effect on our robot (tested 2026-11-15), so the robot has to be in that posture by other means, and `camera.crawl_height_m` (0.20, a first guess) should be measured. The camera's tilt is assumed the same in both postures.
 
