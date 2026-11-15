@@ -495,6 +495,42 @@ uv run robodog-persons --headless              # print the boxes instead
 ```
 Each box shows the robot's track number (one person keeps it across frames) and the confidence. The class name is always empty: the vendor doesn't fill it in. It runs at 10 Hz and misses people quite often. How it connects: [robotbus.py](src/robodog/robotbus.py).
 
+### 6.11 Trash detection and tracking (`robodog-trash`)
+Run the TACO-trained YOLO detector and ByteTrack on a recorded video, or view the live camera. This only detects and tracks trash; it does not move the robot.
+
+```bash
+uv sync --extra vision-cpu                 # or vision-gpu on an NVIDIA laptop
+uv run robodog-trash recordings/<run>/video.mkv
+uv run robodog-trash recordings/<run>/video.mkv --headless --save annotated.mp4 --csv detections.csv
+```
+For a recording made while the robot was crawling, add `--posture crawl` so distance estimates use the lower camera height. The default posture is `stand`. The first run may download the model weights.
+
+Each tracked piece gets a box labelled `#ID class confidence distance`. The distance is measured on the floor from the point under the camera lens, from the box's bottom-centre (where the piece touches the floor) and the camera geometry in `config.local.yaml` (`camera.height_m` standing, `camera.crawl_height_m` crawling). "cut off" means the box touches the picture's edge, so its foot isn't visible and no distance is given. `--csv` writes one row per box; `--start/--end/--step` pick a part of the video; SPACE pauses.
+
+**How it works** ([vision/trash.py](src/robodog/vision/trash.py)): YOLO finds boxes in each frame; ByteTrack links them across frames into tracks with a stable ID, also through a few blurry or weak frames. `trash.conf` is the confidence needed to *start* a track; an existing track is continued with weaker detections too.
+
+**The model** is `trash.model` in `config.local.yaml`: a local `.pt` file or `hf://<repo>/<file>`. The default is a YOLO11s fine-tuned on TACO ([fabiocigaina/TACO-yolo11s](https://huggingface.co/fabiocigaina/TACO-yolo11s), mAP50 0.31): in our first test its results were poor. Any Ultralytics model works, so try others, optionally with `trash.classes` (or `--model` / `--classes` on the command line):
+```bash
+uv run robodog-trash <video> --model yolo11s.pt --classes "cup, bottle"                     # Ultralytics' COCO model
+uv run robodog-trash <video> --model yolov8s-worldv2.pt --classes "cup, can, bottle, paper" # open vocabulary: classes = words to look for
+```
+The real fix is a model trained on our own frames. A `.pt` file is a Python pickle and **runs code when loaded**, so only use files you trust; the default model's SHA-256 is pinned, and a changed file is refused.
+
+#### Going to a tracked piece (`robodog-goto --trash`)
+```bash
+uv run robodog-goto --allow-motion --trash                   # robot standing
+uv run robodog-goto --allow-motion --trash --posture crawl   # camera at crawl height
+uv run robodog-goto --fake --trash --camera <video or 0>     # try the window with no robot
+```
+The go-to window (§6.7) then shows the tracked boxes. **Click a box** and **hold G**:
+1. **While the camera sees the piece, the goal stays locked on it.** Every detection re-measures where it is and corrects the goal ([target.py](src/robodog/target.py)), so a slightly wrong first box and drifting odometry don't add up. The panel shows `TRACKING, goal corrected Nx`. The robot drives at `trash.follow_vx` (0.10 m/s) so the tracker keeps up.
+2. **When the piece leaves the view** (cut off by the picture's edge, or not seen for `trash.lost_after_s`), correcting stops and the robot **finishes on odometry**, exactly like a plain clicked goal: the panel shows `OUT OF VIEW ... finishing on odometry`. It stops as go-to always does (`goto.stop_before_m`).
+3. If the tracker gives the piece a new ID, a track within `trash.reacquire_m` (0.4 m) of the goal is taken as the same piece.
+
+Each detection is placed using the pose the robot had when that frame was taken (`trash.camera_delay_s` ago), so the robot's own movement in between cancels out. Clicking the floor instead of a box still sets an ordinary fixed goal.
+
+`--posture` only sets the **camera height used for distances**; it does not make the robot crawl. The SDK's `crawl()` had no effect on our robot (tested 2026-11-15), so the robot has to be in that posture by other means, and `camera.crawl_height_m` (0.20, a first guess) should be measured. The camera's tilt is assumed the same in both postures.
+
 ---
 
 ## 7. Safety layer (`robodog` package)

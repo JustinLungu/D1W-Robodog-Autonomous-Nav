@@ -68,6 +68,7 @@ class CameraConfig:
     lens: str                # "fisheye" or "pinhole"
     hfov_deg: float
     height_m: float          # lens height above the floor, robot standing
+    crawl_height_m: float    # the same in the low crawl posture (used with --posture crawl)
     pitch_deg: float         # downward tilt of the lens
     forward_offset_m: float  # lens distance in front of the robot's centre
     measured: bool           # false until height/offset are measured and pitch calibrated
@@ -86,6 +87,19 @@ class GoToConfig:
 
 
 @dataclass
+class TrashConfig:
+    """Trash detection + tracking, and following a tracked piece with go-to (vision/trash.py, target.py)."""
+    model: str               # YOLO weights: a local .pt file, or "hf://<repo>/<file>" on Hugging Face
+    classes: str             # comma-separated class names to keep ("" = all the model knows)
+    conf: float              # confidence needed to START tracking a piece (0-1)
+    imgsz: int               # detector input size in pixels (bigger = finds smaller things, slower)
+    follow_vx: float         # m/s while driving to a tracked target (slow, so the tracker keeps up)
+    camera_delay_s: float    # how old a camera frame is when it reaches the laptop
+    lost_after_s: float      # not seen for this long -> drive on blind (odometry only)
+    reacquire_m: float       # a new track this close to the goal is taken as the same object
+
+
+@dataclass
 class ObstaclesConfig:
     """Camera-based obstacle warning (vision/obstacles.py explains each value)."""
     path_left: float
@@ -101,6 +115,7 @@ class Config:
     safety: SafetyConfig
     camera: CameraConfig
     goto: GoToConfig
+    trash: TrashConfig
     obstacles: ObstaclesConfig
     sdk_dir: Path  # from config.machine.yaml
 
@@ -179,7 +194,7 @@ def load_config(path: str | Path | None = None, machine_path: str | Path | None 
     raw = yaml.safe_load(path.read_text()) or {}
     machine = _load_machine(machine_path)
 
-    unknown = raw.keys() - {"network", "safety", "camera", "goto", "obstacles"}
+    unknown = raw.keys() - {"network", "safety", "camera", "goto", "trash", "obstacles"}
     misplaced = unknown & _MACHINE_KEYS.keys()
     misplaced |= {k for k in ("laptop_ip",) if isinstance(raw.get("network"), dict) and k in raw["network"]}
     misplaced |= {k for k in ("allow_motion",) if isinstance(raw.get("safety"), dict) and k in raw["safety"]}
@@ -202,6 +217,7 @@ def load_config(path: str | Path | None = None, machine_path: str | Path | None 
         safety=_build(SafetyConfig, {**safety, "allow_motion": machine["allow_motion"]}, "safety", path),
         camera=_build(CameraConfig, raw.get("camera"), "camera", path),
         goto=_build(GoToConfig, raw.get("goto"), "goto", path),
+        trash=_build(TrashConfig, raw.get("trash"), "trash", path),
         obstacles=_build(ObstaclesConfig, raw.get("obstacles"), "obstacles", path),
         sdk_dir=sdk_dir,
     )
