@@ -23,8 +23,8 @@ def main():
     args = ap.parse_args()
 
     cfg = load_config(args.config)
-    if "XX" in cfg.network.laptop_ip:
-        raise SystemExit("set network.laptop_ip in config.local.yaml first")
+    if not cfg.network.laptop_ip:
+        raise SystemExit("this laptop isn't on the robot's network (join its Wi-Fi), or set laptop_ip in config.machine.yaml")
 
     # allow_motion=False: SafeDog refuses every motion call, and nothing here calls one anyway.
     dog = SafeDog(make_highlevel(cfg.sdk_dir), cfg, allow_motion=False)

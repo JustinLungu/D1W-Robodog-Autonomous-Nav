@@ -3,7 +3,7 @@
     uv run robodog-stand-test --allow-motion              # hold standing for 60 s
     uv run robodog-stand-test --allow-motion --hold 120
 
-Needs safety.allow_motion: true in config.local.yaml AND --allow-motion.
+Needs allow_motion: true in config.machine.yaml AND --allow-motion.
 Keys while running: [SPACE] e-stop (robot goes limp)   [q] lie down and quit.
 The robot never drives: SafeDog only sends move(0, 0, 0) to keep it standing.
 """
@@ -53,7 +53,7 @@ def main():
 
     cfg = load_config(args.config)
     if not (args.allow_motion and cfg.safety.allow_motion):
-        raise SystemExit("motion needs BOTH safety.allow_motion: true in config.local.yaml AND --allow-motion")
+        raise SystemExit("motion needs BOTH allow_motion: true in config.machine.yaml AND --allow-motion")
 
     dog = SafeDog(make_highlevel(cfg.sdk_dir), cfg, allow_motion=True)
     dog.connect()

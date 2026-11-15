@@ -1,12 +1,20 @@
-"""Load config.local.yaml, the one and only config file (committed to the repo).
+"""Load the config: shared settings + this laptop's settings.
 
-The YAML file is the ONLY place config values live. This module just defines which
+Two files, so a `git pull` never overwrites someone's laptop setup:
+
+- config.local.yaml   SHARED, committed. Speeds, timeouts, robot address. Edit in place.
+- config.machine.yaml THIS LAPTOP ONLY, git-ignored, created automatically on first run:
+                      laptop_ip ("auto" = detect), sdk_dir, allow_motion.
+
+The YAML files are the ONLY place config values live. This module just defines which
 keys must exist and what type they are. A missing or misspelled key is an error, never a
 silent default, because a silently ignored speed cap is the bug we least want.
 """
 
 from __future__ import annotations
 
+import ipaddress
+import socket
 from dataclasses import dataclass, fields
 from pathlib import Path
 
@@ -14,22 +22,36 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = REPO_ROOT / "config.local.yaml"
+MACHINE_PATH = REPO_ROOT / "config.machine.yaml"
+
+# Written the first time anything runs on a laptop. Each person edits their own copy.
+MACHINE_TEMPLATE = """\
+# Settings for THIS laptop only. Created automatically; git ignores this file,
+# so pulls never overwrite it. Shared settings live in config.local.yaml.
+
+laptop_ip: "auto"                 # "auto" = detect this laptop's address on the robot's network
+sdk_dir: "../agibot_D1_Edu-Ultra" # vendor SDK clone; relative paths start from this file's folder
+allow_motion: false               # true = this laptop may move the robot (still needs --allow-motion)
+"""
+
+# Keys that belong in config.machine.yaml, never in the shared file.
+_MACHINE_KEYS = {"laptop_ip": "str", "sdk_dir": "str", "allow_motion": "bool"}
 
 
 class ConfigError(ValueError):
-    """The config file is missing a key, has an unknown key, or has a wrong type."""
+    """A config file is missing a key, has an unknown key, or has a wrong type."""
 
 
 @dataclass
 class NetworkConfig:
-    laptop_ip: str
+    laptop_ip: str  # from config.machine.yaml; "" if "auto" found no address on the robot's network
     robot_ip: str
     port: int
 
 
 @dataclass
 class SafetyConfig:
-    allow_motion: bool
+    allow_motion: bool  # from config.machine.yaml
     max_vx: float
     max_vy: float
     max_yaw: float
@@ -44,7 +66,17 @@ class SafetyConfig:
 class Config:
     network: NetworkConfig
     safety: SafetyConfig
-    sdk_dir: Path
+    sdk_dir: Path  # from config.machine.yaml
+
+
+def _check_type(value, type_name: str) -> bool:
+    if type_name == "bool":
+        return isinstance(value, bool)
+    if type_name == "int":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if type_name == "float":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    return isinstance(value, str)
 
 
 def _build(cls, raw, section: str, source: Path):
@@ -62,38 +94,75 @@ def _build(cls, raw, section: str, source: Path):
     values = {}
     for name, type_name in expected.items():
         value = raw[name]
-        if type_name == "bool":
-            ok = isinstance(value, bool)
-        elif type_name == "int":
-            ok = isinstance(value, int) and not isinstance(value, bool)
-        elif type_name == "float":
-            ok = isinstance(value, (int, float)) and not isinstance(value, bool)
-            value = float(value) if ok else value
-        else:  # str
-            ok = isinstance(value, str)
-        if not ok:
+        if not _check_type(value, type_name):
             raise ConfigError(f"{source}: '{section}.{name}' should be {type_name}, got {value!r}")
-        values[name] = value
+        values[name] = float(value) if type_name == "float" else value
     return cls(**values)
 
 
-def load_config(path: str | Path | None = None) -> Config:
-    """Read the YAML config (config.local.yaml unless another path is given, e.g. in tests)."""
-    path = Path(path or CONFIG_PATH).resolve()
-    raw = yaml.safe_load(path.read_text()) or {}
+def detect_laptop_ip(robot_ip: str) -> str:
+    """This laptop's address on the robot's network, or "" if it isn't on it.
 
-    unknown = raw.keys() - {"network", "safety", "sdk_dir"}
+    Asks the OS which local address it would use to reach the robot (a UDP "connect"
+    sends no packets), then checks it's in the same /24 network as the robot.
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect((robot_ip, 9))
+            ip = s.getsockname()[0]
+    except OSError:
+        return ""
+    same_net = ipaddress.ip_address(ip) in ipaddress.ip_network(f"{robot_ip}/24", strict=False)
+    return ip if same_net else ""
+
+
+def _load_machine(path: Path) -> dict:
+    """Read config.machine.yaml (creating it with safe defaults if it's the default path and missing)."""
+    if not path.exists():
+        if path != MACHINE_PATH:
+            raise ConfigError(f"{path}: not found")
+        path.write_text(MACHINE_TEMPLATE)
+        print(f"created {path.name} for this laptop (motion off). Edit it to change laptop settings.")
+    raw = yaml.safe_load(path.read_text()) or {}
+    missing = _MACHINE_KEYS.keys() - raw.keys()
+    unknown = raw.keys() - _MACHINE_KEYS.keys()
+    if missing:
+        raise ConfigError(f"{path}: missing {sorted(missing)}")
+    if unknown:
+        raise ConfigError(f"{path}: unknown keys {sorted(unknown)} (typo?)")
+    for name, type_name in _MACHINE_KEYS.items():
+        if not _check_type(raw[name], type_name):
+            raise ConfigError(f"{path}: '{name}' should be {type_name}, got {raw[name]!r}")
+    return raw
+
+
+def load_config(path: str | Path | None = None, machine_path: str | Path | None = None) -> Config:
+    """Read the shared config.local.yaml and this laptop's config.machine.yaml."""
+    path = Path(path or CONFIG_PATH).resolve()
+    machine_path = Path(machine_path or MACHINE_PATH).resolve()
+    raw = yaml.safe_load(path.read_text()) or {}
+    machine = _load_machine(machine_path)
+
+    unknown = raw.keys() - {"network", "safety"}
+    misplaced = unknown & _MACHINE_KEYS.keys()
+    misplaced |= {k for k in ("laptop_ip",) if isinstance(raw.get("network"), dict) and k in raw["network"]}
+    misplaced |= {k for k in ("allow_motion",) if isinstance(raw.get("safety"), dict) and k in raw["safety"]}
+    if misplaced:
+        raise ConfigError(f"{path}: {sorted(misplaced)} belong in {MACHINE_PATH.name} (per laptop), not the shared file")
     if unknown:
         raise ConfigError(f"{path}: unknown top-level keys {sorted(unknown)} (typo?)")
-    if not isinstance(raw.get("sdk_dir"), str):
-        raise ConfigError(f"{path}: 'sdk_dir' is missing or not a string")
 
-    sdk_dir = Path(raw["sdk_dir"])
+    network = dict(raw.get("network") or {})
+    safety = dict(raw.get("safety") or {})
+    net = _build(NetworkConfig, {**network, "laptop_ip": ""}, "network", path)
+    net.laptop_ip = detect_laptop_ip(net.robot_ip) if machine["laptop_ip"] == "auto" else machine["laptop_ip"]
+
+    sdk_dir = Path(machine["sdk_dir"])
     if not sdk_dir.is_absolute():
-        sdk_dir = (path.parent / sdk_dir).resolve()
+        sdk_dir = (machine_path.parent / sdk_dir).resolve()
 
     return Config(
-        network=_build(NetworkConfig, raw.get("network"), "network", path),
-        safety=_build(SafetyConfig, raw.get("safety"), "safety", path),
+        network=net,
+        safety=_build(SafetyConfig, {**safety, "allow_motion": machine["allow_motion"]}, "safety", path),
         sdk_dir=sdk_dir,
     )

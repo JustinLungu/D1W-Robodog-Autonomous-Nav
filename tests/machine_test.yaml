@@ -1,0 +1,4 @@
+# Per-laptop settings used by the tests (so tests never read or create the real config.machine.yaml).
+laptop_ip: "127.0.0.1"
+sdk_dir: "."
+allow_motion: false

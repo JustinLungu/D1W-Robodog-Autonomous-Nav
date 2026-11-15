@@ -15,7 +15,7 @@ Follow it top to bottom the first time.
 | Item | Notes |
 |---|---|
 | AgiBot D1 wheeled robot + charger | Charge it to > 50 % before you start |
-| Handheld remote | Your safety net. Someone holds it during every test |
+| Handheld remote (joystick) | For driving by hand. It does **not** work while one of our programs is connected (§6): the laptop is the kill switch then |
 | Laptop with **Ubuntu 22.04, x86_64** | The SDK's Python module is built for **Python 3.10** only, which is Ubuntu 22.04's default |
 | Clear floor space | At least 3 × 3 m, nothing fragile |
 | *(Optional)* Ethernet cable | Lower lag than Wi-Fi. See [§8](#8-optional-ethernet-instead-of-wi-fi) |
@@ -145,7 +145,7 @@ target_port: 43988
 | Firmware you need | Why |
 |---|---|
 | **≥ 0.3.1** | Minimum for the `zsl-1w` SDK |
-| **≥ 0.3.4** | Remote takeover (LT+RT+A / L2+R2+A) while the SDK has control. Below this, the remote is locked out |
+| **≥ 0.3.4** | Vendor docs list it for the remote takeover (LT+RT+A / L2+R2+A). On ours (0.5.1) the takeover did not work while the SDK was connected (§6.5) |
 
 Ours is `0.5.1-xgw` ✅. If yours is older, ask AgiBot support for an update.
 `cp -n` keeps the original config as `sdk_config.yaml.bak` (and never overwrites an existing backup).
@@ -164,23 +164,27 @@ The connection closes. Wait for a **solid blue** tail light (about 1–2 min) an
 
 ## 6. First tests (in this order)
 
-The physical remote (the joystick/controller that came with the robot) is the safety backup that doesn't depend on our code. **Keep it switched on and in your hand during every test.** It talks to the robot directly, not through your laptop.
+**The laptop is the kill switch.** While any program is connected to the robot's SDK (the vendor demo, and even our read-only `robodog-status`), the joystick does nothing, and the takeover combo (LT+RT+A / L2+R2+A) didn't work on our robot either. The joystick works again once the program has exited. So during every SDK test:
 
-| Controller | Take control back from the SDK: hold together |
+| To stop the robot | How |
 |---|---|
-| Logitech gamepad | **LT + RT + A** |
-| Remote with screen | **L2 + R2 + A** |
+| Teleop | **let go of the key** = stop; **SPACE** = e-stop (limp); **Esc** = lie down and quit; clicking away from its window = stop |
+| Stand test | **SPACE** = e-stop; **q** / Ctrl+C = lie down and quit |
+| Vendor demo | **`2` ↵** = lie down, **`0` ↵** = lie down and exit |
+| Program crashes / Wi-Fi drops | The robot's own watchdog should lie it down after ~3 s (tested in [TESTING.md](TESTING.md)) |
 
-Tail light: solid **green** = SDK (our code) has control, solid **blue** = remote has control.
-While any SDK program is connected, the remote is ignored until you take over.
+Whoever runs the laptop is the safety operator: hands on the keyboard. Keep the joystick on anyway, for after the program ends.
+
+**Before trusting any driving, run the reliability tests in [TESTING.md](TESTING.md)**: step by step, with what you should see.
 
 **Battery:** the robot refuses SDK control below **20 %** (yellow tail light), and our code refuses to stand below **25 %**. **Charge to ≥ 50 % before any motion test.** The vendor demo has no battery check at all.
 
 ### 6.1 Read-only status (nothing moves)
-Puts your laptop's address into [config.local.yaml](config.local.yaml) and reads the robot's state:
+Reads the robot's state. Your laptop's address on the robot's Wi-Fi is detected automatically:
 ```bash
-cd ~/robodog/D1W-Robodog-Autonomous-Nav && MYIP=$(ip -4 -br addr | grep -oP '192\.168\.234\.\d+' | head -1) && echo "laptop IP: $MYIP" && sed -i "s/laptop_ip: \"[^\"]*\"/laptop_ip: \"$MYIP\"/" config.local.yaml && uv run robodog-status
+cd ~/robodog/D1W-Robodog-Autonomous-Nav && uv run robodog-status
 ```
+The first run creates `config.machine.yaml` (this laptop's settings, ignored by git: see §7).
 **Before §5** (or with a wrong `target_ip`), you get this, and nothing else happens:
 ```
 laptop IP: 192.168.234.8
@@ -250,14 +254,14 @@ python3 highlevel_demo.py
 **Only use `1`, `2` and `0`.** 3–8 drive, 9 makes it go limp, 10 is a trick.
 Afterwards, stand up and lie down once with the remote to check it's back in control.
 
-### 6.4 Our stand-up test + remote takeover
-The first motion through **our** code ([stand_test.py](src/robodog/cli/stand_test.py)). It stands up through `SafeDog`, holds still for 60 s while printing the status every second, then lies down. It never drives: SafeDog only sends `move(0, 0, 0)` to keep it standing.
+### 6.4 Our stand-up test
+The first motion through **our** code ([stand_test.py](src/robodog/cli/stand_test.py)). It stands up through `SafeDog`, holds still for 60 s while printing the status every second, then lies down. It never drives. For the first 3 s after standing up SafeDog sends nothing (the stand-up is still in progress); after that it only sends `move(0, 0, 0)` to keep it standing.
 
-Turn motion on in the config (and back off afterwards):
+Turn motion on **for this laptop** (and back off afterwards):
 ```bash
-sed -i 's/allow_motion: false/allow_motion: true/' config.local.yaml && grep allow_motion config.local.yaml
+sed -i 's/^allow_motion: false/allow_motion: true/' config.machine.yaml && grep allow_motion config.machine.yaml
 ```
-Run it (robot lying down, 2 m clear, remote in hand):
+Run it (robot lying down, 2 m clear):
 ```bash
 uv run robodog-stand-test --allow-motion
 ```
@@ -269,11 +273,9 @@ It connects, prints the battery, and **asks for ENTER before standing** (Ctrl+C 
 | **q** | Lie down and quit |
 | Ctrl+C | Lie down and quit |
 
-**The takeover test:** while it's standing, hold **LT+RT+A** / **L2+R2+A**. The light should turn blue and the remote should work. Watch whether the robot still reacts to the script's `move(0,0,0)` commands. If it does, `SafeDog` must learn to detect the takeover before any further motion work. Lie the robot down **with the remote**, then press `q`.
-
 Turn motion back off:
 ```bash
-sed -i 's/allow_motion: true/allow_motion: false/' config.local.yaml && grep allow_motion config.local.yaml
+sed -i 's/^allow_motion: true/allow_motion: false/' config.machine.yaml && grep allow_motion config.machine.yaml
 ```
 
 ### 6.4b Keyboard driving (`robodog-teleop`)
@@ -283,7 +285,7 @@ Try the controls without the robot first:
 ```bash
 uv run robodog-teleop --fake
 ```
-On the robot (motion on in the config, see 6.4; 2 m clear, remote in hand):
+On the robot (motion on in `config.machine.yaml`, see 6.4; 2 m clear):
 ```bash
 uv run robodog-teleop --allow-motion
 ```
@@ -298,6 +300,7 @@ A small window opens. **Click it**: keys only count while it has focus, and clic
 | **Q** / **E** | sideways left / right | **Esc** | lie down and quit (closing the window does the same) |
 
 Speed level 1 is the default. The caps are `max_vx` / `max_vy` / `max_yaw` in `config.local.yaml`.
+After **R**, the movement keys are ignored for **3 s** while the robot stands up (the window says `standing up...`); then it ramps up from 0 as usual.
 
 **Recording a drive** for later tests: add `--record` (and optionally a `--note`):
 ```bash
@@ -316,66 +319,16 @@ To match them: laptop time of a video frame = `video_start_unix` + the frame's t
 ### 6.5 Results on our robot
 | Check | Result |
 |---|---|
-| Firmware | `0.5.1-xgw` (takeover supported) |
-| `mode` while lying | `0` |
+| Firmware | `0.5.1-xgw` |
 | SDK connection after §5 | ✅ `connect success!` |
-| `mode` while standing / moving | _todo (6.1 watch mode, 6.4)_ |
-| Remote while `robodog-status` is connected | _todo (6.1)_ |
-| Tail light while the SDK has control | _todo (6.3 / 6.4)_ |
-| Stays standing while the vendor demo sends nothing? | _todo (6.3)_ |
-| Takeover during our stand test, and does the robot ignore our `move(0,0,0)` afterwards? | _todo (6.4)_ |
+| `mode` while lying | `0` |
+| Joystick while an SDK program is connected (even read-only) | ❌ ignored; tail light stays **blue**; works again right after the program exits |
+| Takeover combo during SDK control | ❌ didn't work → the laptop is the kill switch |
+| Vendor demo: stand, forward, back, turn, handshake, lie down, exit | ✅ all as expected |
+| `mode` while standing / moving | _todo_ |
+| Reliability tests ([TESTING.md](TESTING.md)) | _todo: record results there_ |
 
----
-
-## 7. Safety layer (`robodog` package)
-
-All our code talks to the robot through **`SafeDog`** ([src/robodog/safety.py](src/robodog/safety.py)), never through the raw SDK.
-
-| Protection | What it does |
-|---|---|
-| **Motion off by default** | Nothing moves unless `safety.allow_motion: true` is set in `config.local.yaml` **and** the code passes `allow_motion=True` |
-| **Speed caps** | Clamped to `max_vx` / `max_vy` / `max_yaw` (default 0.3 m/s, 0.2 m/s, 0.5 rad/s). Values below the SDK minimums become exactly 0 |
-| **Dead-man switch** | If your code stops calling `set_velocity()` for `cmd_timeout` (0.3 s), the speed drops to 0 |
-| **Keepalive loop** | Sends `move()` at `rate_hz` (30 Hz) while standing, so the robot's 3 s watchdog doesn't trip by accident |
-| **Battery** | Refuses to stand below `min_battery` (25 %). Stops and lies down if the battery drops below that mid-run |
-| **Lost connection / SDK error** | Stops, tries to lie down, and latches a fault. Nothing else is sent until you restart |
-| **E-stop** | `estop()` calls `passive()` (the robot goes limp) and latches. Scripts bind it to **SPACE** |
-| **No stunts** | `jump` / `frontJump` / `backflip` / `shakeHand` aren't exposed at all |
-
-All settings live in one committed file, **[config.local.yaml](config.local.yaml)**. Edit it in place; at minimum set `network.laptop_ip`.
-[src/robodog/config.py](src/robodog/config.py) only defines which keys must exist and their types. A missing key, a typo (`max_vX`) or a wrong type (`allow_motion: "false"` in quotes) stops the program with a clear error instead of being silently ignored. If you add a new setting, add it to `config.local.yaml` and to the class in `config.py`.
-
-Test everything **without the robot**:
-```bash
-uv run pytest                          # safety + config tests against a fake robot
-uv run python tests/dryrun.py                  # scripted session on a fake robot; press SPACE to try the e-stop
-uv run python tests/dryrun.py --low-battery    # see the battery protection kick in
-uv run python tests/dryrun.py --disconnect     # see the lost-connection protection kick in
-```
-
-**Read-only check on the real robot.** It never sends a motion command, so the wheels won't turn:
-```bash
-uv run robodog-status            # connected / battery / mode / tilt, once
-uv run robodog-status --watch    # keep printing until Ctrl+C
-```
-> While any SDK program is connected, the remote may not respond. That's expected. Stop the script to get the remote back.
-
-Using it in your own code:
-```python
-from robodog import SafeDog, load_config
-from robodog.sdk import make_highlevel
-
-cfg = load_config()
-with SafeDog(make_highlevel(cfg.sdk_dir), cfg, allow_motion=True) as dog:
-    dog.connect()
-    dog.start()                 # keepalive / battery / connection loop
-    dog.stand()
-    while running:
-        dog.set_velocity(vx, vy, yaw)   # call at least every 0.3 s
-# leaving the `with` block stops the robot and lies it down
-```
-
-## 6.6 Depth from the camera (Depth Anything V2, experimental)
+### 6.6 Depth from the camera (Depth Anything V2, experimental)
 
 A live view of what [Depth Anything V2](https://github.com/DepthAnything/Depth-Anything-V2) estimates from the robot's RGB camera. It's **vision only**: it never connects to the SDK and is **not** a safety feature. Use it to see how well monocular depth works on your floors and obstacles.
 
@@ -409,6 +362,64 @@ Rough speed of the `small` model (default input: 308 px on CPU, 518 px on GPU):
 > **GPU laptop:** check that `nvidia-smi` works first. Current PyTorch CUDA builds don't support very old cards (GTX 9xx/10xx). If `robodog-depth` reports `cpu` or errors on such a card, it needs an older PyTorch build.
 
 > If `uv run pytest` fails with `No module named 'lark'`, your shell has ROS sourced, and pytest is loading ROS's plugin. Run `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run pytest` instead.
+
+---
+
+## 7. Safety layer (`robodog` package)
+
+All our code talks to the robot through **`SafeDog`** ([src/robodog/safety.py](src/robodog/safety.py)), never through the raw SDK.
+
+| Protection | What it does |
+|---|---|
+| **Motion off by default** | Nothing moves unless `allow_motion: true` is set in **this laptop's** `config.machine.yaml` **and** the code passes `allow_motion=True` (`--allow-motion`) |
+| **Speed caps** | Clamped to `max_vx` / `max_vy` / `max_yaw` (default 0.3 m/s, 0.2 m/s, 0.5 rad/s). Values below the SDK minimums become exactly 0 |
+| **Dead-man switch** | If your code stops calling `set_velocity()` for `cmd_timeout` (0.3 s), the speed drops to 0 |
+| **Keepalive loop** | Sends `move()` at `rate_hz` (30 Hz) while standing, so the robot's 3 s watchdog doesn't trip by accident |
+| **Stand-up pause** | For 3 s after `stand()` (`STAND_SETTLE_S`) nothing is sent and `set_velocity()` is refused, so the stand-up isn't interrupted (same wait as the vendor demo). `settled()` says when it's done; teleop shows `standing up...` meanwhile |
+| **Battery** | Refuses to stand below `min_battery` (25 %). Stops and lies down if the battery drops below that mid-run |
+| **Lost connection / SDK error** | Stops, tries to lie down, and latches a fault. Nothing else is sent until you restart |
+| **E-stop** | `estop()` calls `passive()` (the robot goes limp) and latches. Scripts bind it to **SPACE** |
+| **No stunts** | `jump` / `frontJump` / `backflip` / `shakeHand` aren't exposed at all |
+
+Settings are split in two, so a `git pull` never overwrites someone's laptop setup:
+
+| File | In git? | Contains |
+|---|---|---|
+| **[config.local.yaml](config.local.yaml)** | ✅ shared | Speed caps, timeouts, battery limit, robot address. Edit in place; everyone gets the change |
+| **`config.machine.yaml`** | ❌ ignored | **This laptop only**: `laptop_ip` (`"auto"` = detected), `sdk_dir` (default `../agibot_D1_Edu-Ultra`), `allow_motion` (default `false`). **Created automatically** the first time you run anything |
+
+If your SDK clone is somewhere else, change `sdk_dir` in your `config.machine.yaml`. Putting a per-laptop key in the shared file is an error, so they can't creep back in.
+[src/robodog/config.py](src/robodog/config.py) only defines which keys must exist and their types. A missing key, a typo (`max_vX`) or a wrong type (`allow_motion: "false"` in quotes) stops the program with a clear error instead of being silently ignored. If you add a shared setting, add it to `config.local.yaml` and to the class in `config.py`.
+
+Test everything **without the robot**:
+```bash
+uv run pytest                          # safety + config tests against a fake robot
+uv run python tests/dryrun.py                  # scripted session on a fake robot; press SPACE to try the e-stop
+uv run python tests/dryrun.py --low-battery    # see the battery protection kick in
+uv run python tests/dryrun.py --disconnect     # see the lost-connection protection kick in
+```
+
+**Read-only check on the real robot.** It never sends a motion command, so the wheels won't turn:
+```bash
+uv run robodog-status            # connected / battery / mode / tilt, once
+uv run robodog-status --watch    # keep printing until Ctrl+C
+```
+> While any SDK program is connected, the remote does nothing (even for this read-only check). Stop the script to get the remote back.
+
+Using it in your own code:
+```python
+from robodog import SafeDog, load_config
+from robodog.sdk import make_highlevel
+
+cfg = load_config()
+with SafeDog(make_highlevel(cfg.sdk_dir), cfg, allow_motion=True) as dog:
+    dog.connect()
+    dog.start()                 # keepalive / battery / connection loop
+    dog.stand()
+    while running:
+        dog.set_velocity(vx, vy, yaw)   # call at least every 0.3 s
+# leaving the `with` block stops the robot and lies it down
+```
 
 ---
 
@@ -452,7 +463,10 @@ In code, connect with `initRobot("192.168.168.10", 43988, "192.168.168.168")`.
 | Script hangs in `initRobot` | Wrong Boost version (needs 1.74), or the wrong library (`zsl-1` instead of `zsl-1w`) |
 | `ImportError` for `mc_sdk_zsl_1w_py` | You ran plain `python3` instead of `uv run python` (wrong Python version), or `sys.path` doesn't point to `lib/zsl-1w/x86_64`. Check the SDK is cloned next to this repo |
 | Robot ignores the SDK, tail light yellow | Battery < 20 %. Charge it |
-| Remote doesn't work | An SDK program is running and has control. Stop it, or hold **LT+RT+A** (Logitech) / **L2+R2+A** (remote with screen) to take control back (firmware ≥ 0.3.4) |
+| Remote doesn't work | An SDK program is connected (any of ours, or the vendor demo). Exit it (Esc, `q`, `0`, Ctrl+C) and the remote works again |
+| `this laptop isn't on the robot's network` | Join the robot's Wi-Fi. (Or set a fixed `laptop_ip` in `config.machine.yaml`) |
+| `SDK library folder not found` | Your SDK clone isn't at `sdk_dir` from `config.machine.yaml`. Fix the path there |
+| `... belong in config.machine.yaml` | Someone put `laptop_ip` / `sdk_dir` / `allow_motion` in the shared `config.local.yaml`. Move them to your `config.machine.yaml` |
 | Tail light keeps blinking blue | Network config broken (often the Ethernet settings in §8 with no cable). Log in over Wi-Fi and undo the edits |
 | Robot suddenly goes limp and lies down | It got no SDK commands for **3 s** (watchdog). Your loop froze or Wi-Fi dropped |
 | Robot "does push-ups" when you press stand on the remote | `SDK_CLIENT_IP` is set to an address that doesn't exist. Fix or remove it (§8) |
@@ -462,14 +476,15 @@ In code, connect with `initRobot("192.168.168.10", 43988, "192.168.168.168")`.
 
 ## 10. Safety rules
 
-- **Someone always holds the remote** and knows how to take control back (LT+RT+A / L2+R2+A).
+- **The laptop is the kill switch** while our code runs: let go of the key / SPACE / Esc (teleop), SPACE / q (stand test). The remote only works after the program has exited.
 - **No battery protection under SDK control.** The robot can lose power and drop. Check `getBatteryPower()` in every script and stop below ~25 %.
 - **3 s watchdog:** if the robot gets no command for 3 s, it goes limp and lies down. Send commands in a steady 20–50 Hz loop.
 - **Call `passive()` as an emergency stop.** Bind it to a key in every script.
 - Keep speeds ≤ 0.5 m/s until the code is trusted. `move()` ignores values below its minimum (vx < 0.05 m/s, yaw < 0.1 rad/s), so send exactly `0` to stop.
 - Never call `jump`, `frontJump` or `backflip`, especially with anything mounted on the robot.
 - `config.local.yaml` is committed and this repo is public, so never put passwords in it (e.g. the robot's Wi-Fi password).
-- Don't push `allow_motion: true` by accident. Set it only on the machine that's actually driving the robot.
+- `allow_motion` lives in your own `config.machine.yaml` (not in git): switch it on only for a test session, off afterwards.
+- Don't raise the shared speed caps until the stop tests in [TESTING.md](TESTING.md) pass.
 
 ---
 

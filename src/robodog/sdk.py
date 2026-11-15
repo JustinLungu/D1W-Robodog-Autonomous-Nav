@@ -27,7 +27,7 @@ def load_sdk_module(sdk_dir: Path):
         raise FileNotFoundError(
             f"SDK library folder not found: {lib_dir}\n"
             "Clone https://github.com/AgibotTech/agibot_D1_Edu-Ultra next to this repo "
-            "or set sdk_dir in config.local.yaml."
+            "or set sdk_dir in config.machine.yaml."
         )
 
     # The .so file was compiled for CPython 3.10 ("cpython-310" in its name). Any other

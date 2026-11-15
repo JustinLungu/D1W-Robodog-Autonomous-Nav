@@ -5,7 +5,7 @@
     uv run robodog-teleop --allow-motion --record --note "hallway, chair legs"
                                             # also record camera video + commands (see recorder.py)
 
-Needs safety.allow_motion: true in config.local.yaml AND --allow-motion (not for --fake).
+Needs allow_motion: true in config.machine.yaml AND --allow-motion (not for --fake).
 
 A small window opens. It must have focus (click it): keys typed into other windows
 are ignored, and clicking away stops the robot.
@@ -195,10 +195,11 @@ def main():
         from fake_robot import FakeHighLevel
 
         cfg.safety.allow_motion = True  # fake robot only: nothing real can move
+        cfg.network.laptop_ip = cfg.network.laptop_ip or "127.0.0.1"  # fake robot: no robot Wi-Fi needed
         robot = FakeHighLevel(battery=80)
     else:
         if not (args.allow_motion and cfg.safety.allow_motion):
-            raise SystemExit("motion needs BOTH safety.allow_motion: true in config.local.yaml AND --allow-motion")
+            raise SystemExit("motion needs BOTH allow_motion: true in config.machine.yaml AND --allow-motion")
         from ..sdk import make_highlevel
 
         robot = make_highlevel(cfg.sdk_dir)

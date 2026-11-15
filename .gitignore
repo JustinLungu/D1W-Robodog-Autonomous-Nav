@@ -9,3 +9,6 @@ __pycache__/
 *.mp4
 *.mkv
 recordings/
+
+# Per-laptop settings (created automatically on first run)
+config.machine.yaml

@@ -14,6 +14,11 @@ from .config import Config
 # We turn such values into exactly 0, so what we send is always something the robot accepts.
 MIN_VX, MIN_VY, MIN_YAW = 0.05, 0.1, 0.1
 
+# standUp() takes a few seconds, and the vendor says not to send other commands during the
+# transition. Their demo waits 3 s after standUp() before anything else, so we do the same:
+# the loop sends nothing, and set_velocity() is refused, until this much time has passed.
+STAND_SETTLE_S = 3.0
+
 
 class SafetyError(RuntimeError):
     """The robot is in a fault state (e-stop, low battery, lost connection...)."""
@@ -74,6 +79,7 @@ class SafeDog:
         self._cmd = (0.0, 0.0, 0.0)          # latest speed the script asked for (vx, vy, yaw)
         self._cmd_time = -float("inf")       # when it asked ("-inf" = never, so it starts stale)
         self._active = False                 # True while standing under our control (loop sends move())
+        self._settled_at = float("inf")      # when the current stand-up transition is over
         self._fault: str | None = None       # reason for a latched fault, or None if all is fine
         self._estopped = False               # True after estop(): robot is limp, never touch it again
         self._last_battery_check = -float("inf")  # forces a battery check on the first tick
@@ -87,6 +93,8 @@ class SafeDog:
     def connect(self):
         """Open the connection and wait until the robot answers (or give up after connect_timeout)."""
         n = self.cfg.network
+        if not n.laptop_ip:
+            raise SafetyError("this laptop isn't on the robot's network: join its Wi-Fi (or set laptop_ip in config.machine.yaml)")
         self.log(f"connecting: laptop {n.laptop_ip}:{n.port} -> robot {n.robot_ip}")
         # initRobot() opens the network connection. It returns immediately, so we then
         # poll checkConnect() until the robot actually answers.
@@ -111,6 +119,11 @@ class SafeDog:
             "rpy": list(self.robot.getRPY()),                  # roll, pitch, yaw in radians
         }
 
+    def settled(self) -> bool:
+        """True once a stand() has finished its STAND_SETTLE_S transition (motion commands accepted)."""
+        with self._lock:
+            return self._active and self.clock() >= self._settled_at
+
     @property
     def fault(self) -> str | None:
         """Why SafeDog stopped (e.g. "connection lost"), or None if everything is fine."""
@@ -123,7 +136,7 @@ class SafeDog:
             raise SafetyError(f"robot is faulted: {self._fault}")
         if not self.allow_motion:
             raise MotionBlocked(
-                "motion is disabled: set safety.allow_motion: true in config.local.yaml "
+                "motion is disabled: set allow_motion: true in config.machine.yaml "
                 "AND pass allow_motion=True / --allow-motion"
             )
 
@@ -138,6 +151,7 @@ class SafeDog:
             self._cmd = (0.0, 0.0, 0.0)  # start standing still
             self._check_rc("standUp", self.robot.standUp())
             self._active = True          # switches the loop's keepalive on (see tick())
+            self._settled_at = self.clock() + STAND_SETTLE_S  # ...but only after the stand-up transition
 
     def lie_down(self):
         """Normal, gentle stop: zero speed, then lie down. The loop stops sending move()."""
@@ -150,7 +164,8 @@ class SafeDog:
             self._cmd = (0.0, 0.0, 0.0)
             self._active = False         # loop stops sending move() from the next tick
             # The vendor says lieDown() must not be called while moving, so stop first.
-            self._check_rc("move", self.robot.move(0.0, 0.0, 0.0))
+            if self.clock() >= self._settled_at:  # don't interrupt a stand-up still in progress
+                self._check_rc("move", self.robot.move(0.0, 0.0, 0.0))
             self._check_rc("lieDown", self.robot.lieDown())
 
     def set_velocity(self, vx: float, vy: float = 0.0, yaw: float = 0.0):
@@ -167,6 +182,8 @@ class SafeDog:
             self._require_motion()
             if not self._active:
                 raise SafetyError("call stand() before set_velocity()")
+            if self.clock() < self._settled_at:
+                raise SafetyError(f"still standing up: wait {STAND_SETTLE_S:.0f} s after stand() (see settled())")
             self._cmd = (
                 _shape(vx, self.s.max_vx, MIN_VX),
                 _shape(vy, self.s.max_vy, MIN_VY),
@@ -227,6 +244,8 @@ class SafeDog:
 
                 if not self._active:
                     return  # lying down / not started: send nothing
+                if now < self._settled_at:
+                    return  # still standing up: don't interrupt the transition
 
                 # Dead-man switch: if the script hasn't called set_velocity() recently
                 # (it crashed, froze, or forgot), send 0 instead of the old speed.

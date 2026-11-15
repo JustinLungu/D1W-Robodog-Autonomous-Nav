@@ -2,11 +2,20 @@
 
 import threading
 
+import pytest
+
 from fake_robot import FakeHighLevel
 from test_safety import pinned_config
 
 from robodog.cli.stand_test import run_stand_test
+import robodog.safety as safety
 from robodog.safety import SafeDog
+
+
+@pytest.fixture(autouse=True)
+def no_stand_wait(monkeypatch):
+    """These tests are about driving, not the stand-up pause (tested separately)."""
+    monkeypatch.setattr(safety, "STAND_SETTLE_S", 0.05)
 
 
 def make(battery=80):

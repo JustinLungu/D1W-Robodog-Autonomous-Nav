@@ -91,7 +91,7 @@ class Teleop:
                 self.message = "standing up..."
                 self.dog.stand()
                 self.standing = True
-                self.message = "standing. hold W/A/S/D (or arrows) to drive"
+                self.message = "standing up... (keys ignored for 3 s)"
             elif name == "lie_down":
                 if not self.standing:
                     return
@@ -128,6 +128,13 @@ class Teleop:
             return
         if not self.standing:
             return
+        if not self.dog.settled():
+            # Still in the stand-up transition: SafeDog refuses speeds now. Keep the ramp at 0,
+            # so holding W during the stand-up doesn't make it lurch the moment it's done.
+            self._cur = [0.0, 0.0, 0.0]
+            return
+        if self.message.startswith("standing up"):
+            self.message = "standing. hold W/A/S/D (or arrows) to drive"
         tgt = self.target()
         for i in range(3):
             released = tgt[i] == 0.0

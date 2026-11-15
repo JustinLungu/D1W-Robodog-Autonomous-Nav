@@ -31,6 +31,7 @@ def main():
 
     cfg = load_config(args.config)
     cfg.safety.allow_motion = True  # fake robot only: safe to enable here
+    cfg.network.laptop_ip = cfg.network.laptop_ip or "127.0.0.1"  # fake robot: no robot Wi-Fi needed
     robot = FakeHighLevel(battery=80)
     dog = SafeDog(robot, cfg, allow_motion=True, log=lambda m: print(f"[safedog] {m}"))
     quit_event = threading.Event()
@@ -58,6 +59,9 @@ def main():
         try:
             print(f"caps: vx<={cfg.safety.max_vx}  vy<={cfg.safety.max_vy}  yaw<={cfg.safety.max_yaw}")
             dog.stand()
+            print("--- standing up (SafeDog sends nothing for 3 s)")
+            while not dog.settled() and not dog.fault and not quit_event.is_set():
+                time.sleep(0.1)
             phase("stand still", 1.0, (0, 0, 0))
             phase("ask for vx=1.0 m/s -> clamped", 2.0, (1.0, 0, 0))
             if args.low_battery:

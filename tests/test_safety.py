@@ -2,9 +2,9 @@
 
 import pytest
 
-from robodog.config import CONFIG_PATH, load_config
+from robodog.config import CONFIG_PATH, REPO_ROOT, load_config
 from fake_robot import FakeHighLevel  # tests/fake_robot.py
-from robodog.safety import MotionBlocked, SafeDog, SafetyError
+from robodog.safety import STAND_SETTLE_S, MotionBlocked, SafeDog, SafetyError
 
 
 class Clock:
@@ -27,7 +27,7 @@ TEST_SAFETY = dict(
 
 def pinned_config():
     """The real config file, with safety values pinned to TEST_SAFETY."""
-    cfg = load_config(CONFIG_PATH)
+    cfg = load_config(CONFIG_PATH, REPO_ROOT / "tests" / "machine_test.yaml")
     for k, v in TEST_SAFETY.items():
         setattr(cfg.safety, k, v)
     return cfg
@@ -42,6 +42,12 @@ def make(allow_motion=True, battery=80, **safety):
     clock = Clock()
     dog = SafeDog(robot, cfg, allow_motion=allow_motion, clock=clock, log=lambda m: None)
     return dog, robot, clock
+
+
+def stand(dog, clock):
+    """Stand up and let the (fake) clock run past the stand-up transition."""
+    dog.stand()
+    clock.advance(STAND_SETTLE_S)
 
 
 def moves(robot):
@@ -81,16 +87,16 @@ def test_velocity_requires_stand():
 
 # ---------------------------------------------------------------- shaping
 def test_speeds_are_clamped():
-    dog, robot, _ = make(max_vx=0.3, max_vy=0.2, max_yaw=0.5)
-    dog.stand()
+    dog, robot, clock = make(max_vx=0.3, max_vy=0.2, max_yaw=0.5)
+    stand(dog, clock)
     dog.set_velocity(5.0, -5.0, 9.0)
     dog.tick()
     assert moves(robot)[-1] == (0.3, -0.2, 0.5)
 
 
 def test_values_below_sdk_minimum_become_zero():
-    dog, robot, _ = make()
-    dog.stand()
+    dog, robot, clock = make()
+    stand(dog, clock)
     dog.set_velocity(0.04, 0.09, -0.05)
     dog.tick()
     assert moves(robot)[-1] == (0.0, 0.0, 0.0)
@@ -99,7 +105,7 @@ def test_values_below_sdk_minimum_become_zero():
 # ---------------------------------------------------------------- dead-man / keepalive
 def test_deadman_zeroes_stale_command():
     dog, robot, clock = make(cmd_timeout=0.3)
-    dog.stand()
+    stand(dog, clock)
     dog.set_velocity(0.2)
     dog.tick()
     assert moves(robot)[-1] == (0.2, 0.0, 0.0)
@@ -110,7 +116,7 @@ def test_deadman_zeroes_stale_command():
 
 def test_loop_keeps_feeding_robot_while_standing():
     dog, robot, clock = make()
-    dog.stand()
+    stand(dog, clock)
     for _ in range(30):
         dog.tick()
         clock.advance(1 / 30)
@@ -127,7 +133,7 @@ def test_refuses_to_stand_on_low_battery():
 
 def test_battery_drop_halts_and_lies_down():
     dog, robot, clock = make(min_battery=25)
-    dog.stand()
+    stand(dog, clock)
     dog.set_velocity(0.2)
     dog.tick()
     robot.battery = 20
@@ -141,8 +147,8 @@ def test_battery_drop_halts_and_lies_down():
 
 # ---------------------------------------------------------------- connection / errors
 def test_connection_loss_halts():
-    dog, robot, _ = make()
-    dog.stand()
+    dog, robot, clock = make()
+    stand(dog, clock)
     robot.connected = False
     dog.tick()
     assert dog.fault == "connection lost"
@@ -152,7 +158,7 @@ def test_connection_loss_halts():
 
 def test_fault_latches_and_loop_goes_quiet():
     dog, robot, clock = make()
-    dog.stand()
+    stand(dog, clock)
     robot.connected = False
     dog.tick()
     n_calls = len(robot.calls)
@@ -165,8 +171,8 @@ def test_fault_latches_and_loop_goes_quiet():
 
 
 def test_sdk_exception_halts():
-    dog, robot, _ = make()
-    dog.stand()
+    dog, robot, clock = make()
+    stand(dog, clock)
     dog.set_velocity(0.2)
 
     def boom(*a):
@@ -179,8 +185,8 @@ def test_sdk_exception_halts():
 
 # ---------------------------------------------------------------- e-stop
 def test_estop_goes_passive_and_latches():
-    dog, robot, _ = make()
-    dog.stand()
+    dog, robot, clock = make()
+    stand(dog, clock)
     dog.set_velocity(0.2)
     dog.estop("test")
     assert robot.calls_named("passive")
@@ -200,8 +206,8 @@ def test_estop_works_even_when_motion_disabled():
 
 
 def test_close_lies_down_if_standing():
-    dog, robot, _ = make()
-    dog.stand()
+    dog, robot, clock = make()
+    stand(dog, clock)
     dog.close()
     assert robot.calls_named("lieDown")
 
@@ -209,3 +215,35 @@ def test_close_lies_down_if_standing():
 def test_no_stunts_exposed():
     for name in ("jump", "frontJump", "backflip", "shakeHand", "front_jump"):
         assert not hasattr(SafeDog, name)
+
+
+# ---------------------------------------------------------------- stand-up transition
+def test_nothing_sent_while_standing_up():
+    dog, robot, clock = make()
+    dog.stand()
+    for _ in range(10):
+        dog.tick()
+        clock.advance(0.1)  # 1 s, still inside the transition
+    assert moves(robot) == []
+    assert not dog.settled()
+    clock.advance(STAND_SETTLE_S)
+    dog.tick()
+    assert moves(robot) == [(0.0, 0.0, 0.0)]  # keepalive starts once settled
+    assert dog.settled()
+
+
+def test_velocity_refused_while_standing_up():
+    dog, robot, clock = make()
+    dog.stand()
+    with pytest.raises(SafetyError, match="still standing up"):
+        dog.set_velocity(0.2)
+    clock.advance(STAND_SETTLE_S)
+    dog.set_velocity(0.2)  # fine now
+
+
+def test_lie_down_during_stand_up_sends_no_move():
+    dog, robot, clock = make()
+    dog.stand()
+    dog.lie_down()
+    assert moves(robot) == []
+    assert robot.calls[-1][0] == "lieDown"
