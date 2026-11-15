@@ -53,6 +53,10 @@ class FakeHighLevel:
         self.mode = MODE_PASSIVE
         return 0
 
+    def shakeHand(self):
+        self._record("shakeHand")
+        return 0
+
     def move(self, vx, vy, yaw_rate):
         self._record("move", float(vx), float(vy), float(yaw_rate))
         if self.mode != MODE_PASSIVE:

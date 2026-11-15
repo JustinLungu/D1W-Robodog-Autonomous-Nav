@@ -25,7 +25,7 @@ MOTION = {
     "strafe_left": (1, +1), "strafe_right": (1, -1),
     "turn_left": (2, +1), "turn_right": (2, -1),
 }
-ACTIONS = ("stand", "lie_down", "speed_1", "speed_2", "speed_3", "estop", "quit")
+ACTIONS = ("stand", "lie_down", "shake_hand", "speed_1", "speed_2", "speed_3", "estop", "quit")
 
 # Speed levels as a fraction of the caps in config.local.yaml (max_vx / max_vy / max_yaw).
 SPEED_LEVELS = {1: 0.33, 2: 0.66, 3: 1.0}
@@ -77,9 +77,10 @@ class Teleop:
             raise ValueError(f"unknown action {name!r}")
         try:
             if name == "estop":
+                self._stop_now()
                 self.dog.estop("SPACE pressed")
                 self.standing = False
-                self.message = "E-STOP: robot is limp. Restart the program to move again"
+                self.message = "E-STOP: stopped, lying down (fully down in 3 s). Restart to move again"
             elif name == "quit":
                 self.quit = True
             elif name.startswith("speed_"):
@@ -92,13 +93,19 @@ class Teleop:
                 self.dog.stand()
                 self.standing = True
                 self.message = "standing up... (keys ignored for 3 s)"
+            elif name == "shake_hand":
+                if not self.standing:
+                    return
+                self._stop_now()
+                self.dog.shake_hand()  # refused (message below) while still standing up
+                self.message = "shaking hands... (keys ignored ~7 s)"
             elif name == "lie_down":
                 if not self.standing:
                     return
                 self._stop_now()
                 self.dog.lie_down()
                 self.standing = False
-                self.message = "lying down. press R to stand up"
+                self.message = "lying down (fully down in 3 s). press R to stand up"
         except SafetyError as e:  # includes MotionBlocked
             self.message = f"refused: {e}"
             self.log(self.message)
@@ -133,7 +140,7 @@ class Teleop:
             # so holding W during the stand-up doesn't make it lurch the moment it's done.
             self._cur = [0.0, 0.0, 0.0]
             return
-        if self.message.startswith("standing up"):
+        if self.message.startswith(("standing up", "shaking hands")):
             self.message = "standing. hold W/A/S/D (or arrows) to drive"
         tgt = self.target()
         for i in range(3):

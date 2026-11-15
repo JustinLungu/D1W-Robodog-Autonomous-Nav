@@ -14,7 +14,8 @@ are ignored, and clicking away stops the robot.
   W / Up      forward                 R      stand up
   S / Down    backward                F      lie down
   A / Left    turn left               1 2 3  speed level (slow / medium / max cap)
-  D / Right   turn right              SPACE  E-STOP (robot goes limp, latched)
+  D / Right   turn right              H      shake hands (~7 s, then standing again)
+                                      SPACE  E-STOP (stop + lie down, latched)
   Q / E       sideways left / right   Esc    lie down and quit (also: close the window)
 
 Speeds stay under the caps in config.local.yaml; all SafeDog protections apply.
@@ -50,7 +51,7 @@ def key_maps():
         pg.K_q: "strafe_left", pg.K_e: "strafe_right",
     }
     click = {
-        pg.K_r: "stand", pg.K_f: "lie_down",
+        pg.K_r: "stand", pg.K_f: "lie_down", pg.K_h: "shake_hand",
         pg.K_1: "speed_1", pg.K_2: "speed_2", pg.K_3: "speed_3",
         pg.K_KP1: "speed_1", pg.K_KP2: "speed_2", pg.K_KP3: "speed_3",
         pg.K_SPACE: "estop", pg.K_ESCAPE: "quit",
@@ -98,7 +99,7 @@ def draw(screen, fonts, st, status, fake, rec=None):
 
     help_lines = [
         "HOLD  W/S fwd/back   A/D turn   Q/E sideways   (arrows too)",
-        "CLICK R stand   F lie down   1/2/3 speed   SPACE e-stop   Esc quit",
+        "CLICK R stand   F lie down   H handshake   1/2/3 speed   SPACE e-stop   Esc quit",
     ]
     for h in help_lines:
         screen.blit(small.render(h, True, DIM), (20, y)); y += 22

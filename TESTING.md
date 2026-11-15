@@ -113,11 +113,11 @@ reset
 ### Test 3: E-stop while standing (SPACE)
 1. Terminal 1: same command as test 2, **ENTER**, wait until it's standing.
 2. Press **SPACE**.
-3. **See:** `!!! E-STOP (SPACE pressed): calling passive()`. The robot goes **limp and sinks down** where it is (damping mode, not a gentle lie-down: expected).
+3. **See:** `!!! E-STOP (SPACE pressed): stopping and lying down`. The robot **crouches**, then about **3 s later settles fully down** (no collapse). If you instead see `lying down failed ... calling passive() instead`, it went limp as the fallback: note it.
 4. **See:** `stopped by SafeDog: E-STOP (SPACE pressed)`, the program ends.
 5. Joystick: stand up and lie down.
 
-**Pass:** goes limp immediately (< 0.5 s); nothing else happens; joystick works after the program exits.
+**Pass:** starts lying down within ~0.5 s; nothing else happens; joystick works after the program exits.
 
 ### Test 4: Program crash while standing (robot's watchdog)
 **Goal:** prove the robot stops by itself if our program dies without saying goodbye.
@@ -169,7 +169,8 @@ Mark the robot's start position on the floor with tape (e.g. at the front wheels
 | **W** / ↑ | forward | **R** | stand up |
 | **S** / ↓ | backward | **F** | lie down |
 | **A** / ← | turn left | **1 2 3** | speed level |
-| **D** / → | turn right | **SPACE** | **E-stop** (limp, latched) |
+| **D** / → | turn right | **SPACE** | **E-stop** (stop + lie down, latched) |
+| | | **H** | shake hands (then stands again) |
 | **Q** / **E** | sideways | **Esc** | lie down and quit |
 
 ### Test 6: Controls without the robot
@@ -188,10 +189,11 @@ Press R, hold W, release, press SPACE, Esc. **See** the window react (speeds sho
 2. Click the window. Press **R**.
 3. **See:** `standing up... (keys ignored for 3 s)`, the robot stands. Hold **W** during these 3 s: **nothing happens** (on purpose).
 4. **See:** after ~3 s the message changes to `standing. hold W/A/S/D (or arrows) to drive`.
-5. Press **F**. **See:** the robot lies down.
-6. Press **Esc**. The program ends.
+5. Press **H**. **See:** `shaking hands... (keys ignored ~7 s)`, the robot shakes hands, then stands up again by itself; after ~7 s the message is back to `standing. hold W/A/S/D`. Hold **W** during the handshake: nothing moves.
+6. Press **F**. **See:** the robot crouches, then ~3 s later settles fully down (`mode 51` → `mode 0` in the window). No `transition to Move failed` in the terminal.
+7. Press **Esc**. The program ends.
 
-**Pass:** no movement during the stand-up; lies down on F; exits on Esc.
+**Pass:** no movement during the stand-up or the handshake; handshake ends standing; lies down on F; exits on Esc.
 
 ### Test 8: Hold to drive, release to stop
 1. Teleop as in test 7, **R**, wait for `standing. hold W/A/S/D`.
@@ -214,11 +216,11 @@ Press R, hold W, release, press SPACE, Esc. **See** the window react (speeds sho
 ### Test 10: E-stop while driving (SPACE)
 1. Teleop, **R**, wait. Hold **W**.
 2. After ~1 s, press **SPACE** (keep holding W or not, doesn't matter).
-3. **See:** the robot goes limp and stops; the window shows the e-stop; nothing moves anymore even if you press W.
+3. **See:** the robot stops, then lies down; the window shows `E-STOP: stopped and lying down`; nothing moves anymore even if you press W.
 4. **Measure** how far it rolled after SPACE.
 5. Close the window / Esc.
 
-**Pass:** stops within ~10 cm of where it was when SPACE was pressed.
+**Pass:** stops within ~10 cm of where it was when SPACE was pressed, then lies down (not a collapse).
 
 ### Test 11: Quit while driving (Esc)
 Same as test 10 with **Esc** instead of SPACE.

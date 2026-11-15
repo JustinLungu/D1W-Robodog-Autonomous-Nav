@@ -19,6 +19,19 @@ MIN_VX, MIN_VY, MIN_YAW = 0.05, 0.1, 0.1
 # the loop sends nothing, and set_velocity() is refused, until this much time has passed.
 STAND_SETTLE_S = 3.0
 
+# shakeHand() is a ~4 s trick. The vendor demo sends nothing for 4 s and then calls standUp()
+# again; we copy that exactly (then the usual STAND_SETTLE_S before motion is accepted).
+SHAKE_HAND_S = 4.0
+
+# E-stop: zero speed first, wait this long, then lieDown() (the vendor says lieDown() must not
+# be switched to while moving). Their own remote's "emergency stop" (LB+RB) is a lie-down too.
+ESTOP_STOP_S = 0.3
+
+# Lying down fully takes two steps on this robot: lieDown() only crouches (mode 51); damping
+# (passive(), mode 0) then lets it settle all the way down. The vendor demo's exit does exactly
+# that: lieDown(), wait 3 s, passive(). Their remote also has "damping (slowly lie down)".
+LIE_DOWN_S = 3.0
+
 
 class SafetyError(RuntimeError):
     """The robot is in a fault state (e-stop, low battery, lost connection...)."""
@@ -80,6 +93,9 @@ class SafeDog:
         self._cmd_time = -float("inf")       # when it asked ("-inf" = never, so it starts stale)
         self._active = False                 # True while standing under our control (loop sends move())
         self._settled_at = float("inf")      # when the current stand-up transition is over
+        self._restand_at: float | None = None  # after a handshake: when to call standUp() again
+        self._passive_timer: threading.Timer | None = None  # pending "fully down" step after lieDown()
+        self._last_posture = ("start", self.clock())  # last stand/lie/handshake command + when (for warnings)
         self._fault: str | None = None       # reason for a latched fault, or None if all is fine
         self._estopped = False               # True after estop(): robot is limp, never touch it again
         self._last_battery_check = -float("inf")  # forces a battery check on the first tick
@@ -144,6 +160,7 @@ class SafeDog:
         """Stand up. From now on the loop thread keeps sending move() to the robot."""
         with self._lock:
             self._require_motion()
+            self._cancel_fully_down()  # standing up again within LIE_DOWN_S of a lie-down
             # The robot can cut power without warning on a low battery, so don't even start.
             battery = int(self.robot.getBatteryPower())
             if battery < self.s.min_battery:
@@ -154,19 +171,56 @@ class SafeDog:
             self._settled_at = self.clock() + STAND_SETTLE_S  # ...but only after the stand-up transition
 
     def lie_down(self):
-        """Normal, gentle stop: zero speed, then lie down. The loop stops sending move()."""
+        """Normal, gentle stop: zero speed, crouch (lieDown), then LIE_DOWN_S later fully down
+        (passive). The loop stops sending move(). stand() within LIE_DOWN_S cancels the last step.
+        """
         with self._lock:
             if not self.allow_motion:
                 raise MotionBlocked("motion is disabled")
             if self._estopped:
-                # After an e-stop the robot is limp; don't send it anything else.
-                raise SafetyError("e-stopped: robot is already limp")
+                # After an e-stop the robot is already going down; don't send it anything else.
+                raise SafetyError("e-stopped: robot is already lying down")
+            was_standing = self._active and self.clock() >= self._settled_at
             self._cmd = (0.0, 0.0, 0.0)
             self._active = False         # loop stops sending move() from the next tick
-            # The vendor says lieDown() must not be called while moving, so stop first.
-            if self.clock() >= self._settled_at:  # don't interrupt a stand-up still in progress
+            self._restand_at = None      # cancel a pending re-stand after a handshake
+            # The vendor says lieDown() must not be called while moving, so stop first. Only if
+            # it was actually standing: a crouched robot rejects move() ("transition to Move failed").
+            if was_standing:
                 self._check_rc("move", self.robot.move(0.0, 0.0, 0.0))
             self._check_rc("lieDown", self.robot.lieDown())
+            self._schedule_fully_down()
+
+    # --- second step of lying down: damping after the crouch -----------------------------
+    def _schedule_fully_down(self):
+        """In LIE_DOWN_S, switch to damping so the robot settles fully down (unless it stood up again)."""
+        self._cancel_fully_down()
+        timer = threading.Timer(LIE_DOWN_S, self._fully_down_now)
+        timer.daemon = True
+        self._passive_timer = timer
+        timer.start()
+
+    def _fully_down_now(self):
+        with self._lock:
+            if self._active:  # stood up again meanwhile: leave it standing
+                return
+            self._passive_timer = None
+        try:
+            self._check_rc("passive", self.robot.passive())
+        except Exception as e:
+            self.log(f"passive() raised: {e!r}")
+
+    def _cancel_fully_down(self):
+        if self._passive_timer:
+            self._passive_timer.cancel()
+            self._passive_timer = None
+
+    def wait_fully_down(self):
+        """Block until a pending "fully down" step has run (used by close(), so the program
+        doesn't exit with the robot still crouched)."""
+        timer = self._passive_timer
+        if timer:
+            timer.join(LIE_DOWN_S + 1.0)
 
     def set_velocity(self, vx: float, vy: float = 0.0, yaw: float = 0.0):
         """Ask for a speed. Must be called again within cmd_timeout or it resets to 0.
@@ -191,28 +245,58 @@ class SafeDog:
             )
             self._cmd_time = self.clock()  # timestamp for the dead-man switch in tick()
 
-    def estop(self, reason: str = "manual"):
-        """EMERGENCY stop: the robot goes limp right away and SafeDog never moves it again.
+    def shake_hand(self):
+        """Shake hands, exactly like the vendor demo: shakeHand(), send nothing for SHAKE_HAND_S,
+        then standUp() again (and the usual STAND_SETTLE_S). Only while standing still.
 
-        Uses the SDK's passive() (damping mode): motors go soft and the robot sinks
-        down where it is. Abrupt, but the fastest stop there is. For a normal stop use
-        lie_down() instead. Works even when motion is disabled.
+        settled() is False for the whole sequence, so motion is refused until it's done.
+        """
+        with self._lock:
+            self._require_motion()
+            if not self._active or self.clock() < self._settled_at:
+                raise SafetyError("shake hands only while standing still (wait for the stand-up to finish)")
+            self._cmd = (0.0, 0.0, 0.0)
+            self._check_rc("shakeHand", self.robot.shakeHand())
+            self._settled_at = float("inf")                      # no motion until the re-stand is done
+            self._restand_at = self.clock() + SHAKE_HAND_S       # tick() calls standUp() then
+
+    def estop(self, reason: str = "manual"):
+        """EMERGENCY stop: stop now, lie down, and SafeDog never moves the robot again (latched).
+
+        Speed goes to 0 immediately (if it was standing), then after ESTOP_STOP_S the robot
+        crouches (lieDown, like the vendor remote's emergency stop LB+RB) and LIE_DOWN_S later
+        settles fully down (passive). If lieDown() fails, it goes straight to passive()
+        (motors go soft and the robot sinks down), so the e-stop always stops the robot.
+        Works even when motion is disabled. Restart the program to move again.
         """
         # Step 1, under the lock: mark everything as stopped, so the loop thread can't
         # send another move() after this point.
         with self._lock:
+            was_standing = self._active and self.clock() >= self._settled_at
             self._estopped = True
             self._fault = f"E-STOP ({reason})"
             self._active = False
+            self._restand_at = None
             self._cmd = (0.0, 0.0, 0.0)
             self.last_sent = (0.0, 0.0, 0.0)  # nothing moves now; don't keep showing the old speed
         # Step 2, outside the lock: tell the robot. Outside so that a slow or stuck SDK
         # call can't block other threads that need the lock.
-        self.log(f"!!! {self._fault}: calling passive()")
+        self.log(f"!!! {self._fault}: stopping and lying down")
         try:
-            self.robot.passive()
+            if was_standing:  # a crouched robot rejects move()
+                self.robot.move(0.0, 0.0, 0.0)
+                time.sleep(ESTOP_STOP_S)  # let it stop before switching to lying down
+            rc = self.robot.lieDown()
+            self._last_posture = ("lieDown", self.clock())
+            if rc not in (0, None):
+                raise RuntimeError(f"lieDown() returned error code {rc}")
+            self._schedule_fully_down()  # crouch now, fully down in LIE_DOWN_S
         except Exception as e:  # never let an exception stop the e-stop path
-            self.log(f"passive() raised: {e!r}")
+            self.log(f"lying down failed ({e!r}): calling passive() instead")
+            try:
+                self.robot.passive()
+            except Exception as e2:
+                self.log(f"passive() raised: {e2!r}")
 
     # ------------------------------------------------------------------ control loop (LOOP thread)
     def tick(self):
@@ -244,6 +328,13 @@ class SafeDog:
 
                 if not self._active:
                     return  # lying down / not started: send nothing
+                if self._restand_at is not None:
+                    if now < self._restand_at:
+                        return  # handshake trick still running: send nothing
+                    self._restand_at = None
+                    self._check_rc("standUp", self.robot.standUp())  # same as the vendor demo
+                    self._settled_at = now + STAND_SETTLE_S
+                    return
                 if now < self._settled_at:
                     return  # still standing up: don't interrupt the transition
 
@@ -263,12 +354,13 @@ class SafeDog:
     def _halt(self, reason: str):
         """Controlled stop after a problem: zero speed, try to lie down, latch a fault.
 
-        Gentler than estop(): the robot lies down instead of going limp.
+        Like estop(), but triggered by SafeDog itself (lost connection, low battery, SDK error).
         Called from tick(), which already holds the lock.
         """
         self._fault = reason
         was_active = self._active
         self._active = False
+        self._restand_at = None
         self._cmd = (0.0, 0.0, 0.0)
         self.last_sent = (0.0, 0.0, 0.0)
         self.log(f"!!! halting: {reason}")
@@ -280,11 +372,24 @@ class SafeDog:
                     call()
                 except Exception as e:
                     self.log(f"{name}() during halt raised: {e!r}")
+            self._schedule_fully_down()
+
+    # Posture commands, remembered so error warnings can say "x s after standUp".
+    _POSTURE = ("standUp", "lieDown", "passive", "shakeHand")
 
     def _check_rc(self, name: str, rc):
-        """SDK commands return 0 for OK, anything else is an error code. Log those."""
+        """SDK commands return 0 for OK, anything else is an error code. Log those, with the
+        robot's mode and how long after the last posture command it happened (to find out why)."""
+        now = self.clock()
         if rc not in (0, None):
-            self.log(f"warning: {name}() returned error code {rc}")
+            last, at = self._last_posture
+            try:
+                mode = int(self.robot.getCurrentCtrlmode())
+            except Exception:
+                mode = "?"
+            self.log(f"warning: {name}() returned error code {rc} (robot mode {mode}, {now - at:.2f} s after {last})")
+        if name in self._POSTURE:
+            self._last_posture = (name, now)
 
     def start(self):
         """Start the loop thread that calls tick() rate_hz times a second."""
@@ -316,6 +421,7 @@ class SafeDog:
                 self.lie_down()
             except Exception as e:
                 self.log(f"lie_down() on close raised: {e!r}")
+        self.wait_fully_down()  # up to LIE_DOWN_S: don't exit with the robot still crouched
         self._stop_event.set()
         if self._thread:
             self._thread.join(timeout=2)  # wait (max 2 s) for the loop to finish its last tick

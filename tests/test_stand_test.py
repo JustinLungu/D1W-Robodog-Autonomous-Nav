@@ -33,7 +33,7 @@ def test_stands_holds_still_and_lies_down():
     dog, robot = make()
     run_stand_test(dog, hold_s=0.3, quit_event=threading.Event(), print_fn=lambda m: None)
     assert names(robot)[0] == "standUp"
-    assert names(robot)[-1] == "lieDown"
+    assert names(robot)[-2:] == ["lieDown", "passive"]  # crouch, then fully down
     moves = robot.calls_named("move")
     assert moves and all(m[1:] == (0.0, 0.0, 0.0) for m in moves)  # never drives
 
@@ -43,7 +43,7 @@ def test_quit_key_ends_early():
     quit_event = threading.Event()
     quit_event.set()
     run_stand_test(dog, hold_s=60, quit_event=quit_event, print_fn=lambda m: None)
-    assert names(robot)[-1] == "lieDown"
+    assert names(robot)[-2:] == ["lieDown", "passive"]  # crouch, then fully down
 
 
 def test_low_battery_refuses_to_stand():

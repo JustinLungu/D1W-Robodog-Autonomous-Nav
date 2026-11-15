@@ -4,7 +4,7 @@
     uv run robodog-stand-test --allow-motion --hold 120
 
 Needs allow_motion: true in config.machine.yaml AND --allow-motion.
-Keys while running: [SPACE] e-stop (robot goes limp)   [q] lie down and quit.
+Keys while running: [SPACE] e-stop (stop + lie down, latched)   [q] lie down and quit.
 The robot never drives: SafeDog only sends move(0, 0, 0) to keep it standing.
 """
 

@@ -168,7 +168,7 @@ The connection closes. Wait for a **solid blue** tail light (about 1–2 min) an
 
 | To stop the robot | How |
 |---|---|
-| Teleop | **let go of the key** = stop; **SPACE** = e-stop (limp); **Esc** = lie down and quit; clicking away from its window = stop |
+| Teleop | **let go of the key** = stop; **SPACE** = e-stop (stop + lie down, latched); **Esc** = lie down and quit; clicking away from its window = stop |
 | Stand test | **SPACE** = e-stop; **q** / Ctrl+C = lie down and quit |
 | Vendor demo | **`2` ↵** = lie down, **`0` ↵** = lie down and exit |
 | Program crashes / Wi-Fi drops | The robot's own watchdog should lie it down after ~3 s (tested in [TESTING.md](TESTING.md)) |
@@ -269,7 +269,7 @@ It connects, prints the battery, and **asks for ENTER before standing** (Ctrl+C 
 
 | Key | Effect |
 |---|---|
-| **SPACE** | E-stop: robot goes limp immediately, script stops sending anything |
+| **SPACE** | E-stop: speed 0, then lies down; latched (script stops sending anything else) |
 | **q** | Lie down and quit |
 | Ctrl+C | Lie down and quit |
 
@@ -296,7 +296,8 @@ A small window opens. **Click it**: keys only count while it has focus, and clic
 | **W** / ↑ | forward | **R** | stand up |
 | **S** / ↓ | backward | **F** | lie down |
 | **A** / ← | turn left | **1 2 3** | speed level: 33 % / 66 % / 100 % of the caps |
-| **D** / → | turn right | **SPACE** | **E-stop**: robot goes limp, latched until restart |
+| **D** / → | turn right | **SPACE** | **E-stop**: stops and lies down, latched until restart |
+| | | **H** | shake hands (like the vendor demo's `10`): ~4 s trick, then stands up again; movement keys ignored ~7 s |
 | **Q** / **E** | sideways left / right | **Esc** | lie down and quit (closing the window does the same) |
 
 Speed level 1 is the default. The caps are `max_vx` / `max_vy` / `max_yaw` in `config.local.yaml`.
@@ -378,8 +379,9 @@ All our code talks to the robot through **`SafeDog`** ([src/robodog/safety.py](s
 | **Stand-up pause** | For 3 s after `stand()` (`STAND_SETTLE_S`) nothing is sent and `set_velocity()` is refused, so the stand-up isn't interrupted (same wait as the vendor demo). `settled()` says when it's done; teleop shows `standing up...` meanwhile |
 | **Battery** | Refuses to stand below `min_battery` (25 %). Stops and lies down if the battery drops below that mid-run |
 | **Lost connection / SDK error** | Stops, tries to lie down, and latches a fault. Nothing else is sent until you restart |
-| **E-stop** | `estop()` calls `passive()` (the robot goes limp) and latches. Scripts bind it to **SPACE** |
-| **No stunts** | `jump` / `frontJump` / `backflip` / `shakeHand` aren't exposed at all |
+| **E-stop** | `estop()` sets speed 0, waits 0.3 s, crouches (`lieDown()`), and 3 s later settles fully down (`passive()`). If lying down fails it goes straight to `passive()`. Latched. Scripts bind it to **SPACE** |
+| **Lying down fully** | On this robot `lieDown()` only **crouches** (mode 51); **damping** (`passive()`, mode 0) then lets it settle all the way down, like the vendor demo's exit. `lie_down()`, the e-stop and `close()` all do crouch → 3 s (`LIE_DOWN_S`) → damping; standing up again within those 3 s cancels the last step. No stop command is sent to a robot that's already crouched (it rejects it: `transition to Move failed`) |
+| **No stunts** | `jump` / `frontJump` / `backflip` aren't exposed at all. Only the handshake is (`shake_hand()`, copying the vendor demo: nothing sent for 4 s, then stand up again) |
 
 Settings are split in two, so a `git pull` never overwrites someone's laptop setup:
 
@@ -466,6 +468,7 @@ In code, connect with `initRobot("192.168.168.10", 43988, "192.168.168.168")`.
 | Remote doesn't work | An SDK program is connected (any of ours, or the vendor demo). Exit it (Esc, `q`, `0`, Ctrl+C) and the remote works again |
 | `this laptop isn't on the robot's network` | Join the robot's Wi-Fi. (Or set a fixed `laptop_ip` in `config.machine.yaml`) |
 | `SDK library folder not found` | Your SDK clone isn't at `sdk_dir` from `config.machine.yaml`. Fix the path there |
+| `transition to Move failed!` / `move() returned error code 12295` | A move command reached a robot that was crouched (mode 51). Fixed: we no longer send one there. If it shows up again, note what you pressed just before |
 | `... belong in config.machine.yaml` | Someone put `laptop_ip` / `sdk_dir` / `allow_motion` in the shared `config.local.yaml`. Move them to your `config.machine.yaml` |
 | Tail light keeps blinking blue | Network config broken (often the Ethernet settings in §8 with no cable). Log in over Wi-Fi and undo the edits |
 | Robot suddenly goes limp and lies down | It got no SDK commands for **3 s** (watchdog). Your loop froze or Wi-Fi dropped |
@@ -479,7 +482,7 @@ In code, connect with `initRobot("192.168.168.10", 43988, "192.168.168.168")`.
 - **The laptop is the kill switch** while our code runs: let go of the key / SPACE / Esc (teleop), SPACE / q (stand test). The remote only works after the program has exited.
 - **No battery protection under SDK control.** The robot can lose power and drop. Check `getBatteryPower()` in every script and stop below ~25 %.
 - **3 s watchdog:** if the robot gets no command for 3 s, it goes limp and lies down. Send commands in a steady 20–50 Hz loop.
-- **Call `passive()` as an emergency stop.** Bind it to a key in every script.
+- **Bind `estop()` to a key in every script** (SPACE in ours): it stops and lies down, and goes limp only if lying down fails.
 - Keep speeds ≤ 0.5 m/s until the code is trusted. `move()` ignores values below its minimum (vx < 0.05 m/s, yaw < 0.1 rad/s), so send exactly `0` to stop.
 - Never call `jump`, `frontJump` or `backflip`, especially with anything mounted on the robot.
 - `config.local.yaml` is committed and this repo is public, so never put passwords in it (e.g. the robot's Wi-Fi password).

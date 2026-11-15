@@ -13,7 +13,7 @@ from ..config import load_config
 from ..safety import SafeDog
 from ..sdk import make_highlevel
 
-MODES = {0: "limp/lying", 1: "standing", 3: "moving"}
+MODES = {0: "lying, motors damped", 1: "standing", 3: "moving", 51: "crouched (lieDown)"}
 
 
 def main():

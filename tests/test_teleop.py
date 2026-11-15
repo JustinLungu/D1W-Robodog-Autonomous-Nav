@@ -108,7 +108,10 @@ def test_estop_latches():
     tele, dog, robot = make()
     tele.action("stand")
     tele.action("estop")
-    assert robot.calls_named("passive")
+    dog.wait_fully_down()
+    names = [c[0] for c in robot.calls]
+    assert names[-2:] == ["lieDown", "passive"]  # crouch, then fully down (not an instant collapse)
+    assert "lying down" in tele.message
     tele.action("stand")  # refused, shown as a message, no exception
     assert not tele.standing and "refused" in tele.message
     drive(tele, dog, {"forward"}, 0.3)
@@ -141,3 +144,21 @@ def test_keys_held_during_stand_up_do_nothing_then_ramp_from_zero(monkeypatch):
     first = tele.state().cmd[0]
     assert 0 < first < 0.1                           # starts ramping from 0, no lurch
     assert "hold W/A/S/D" in tele.message
+
+
+def test_handshake_key_ignores_motion_until_standing_again(monkeypatch):
+    monkeypatch.setattr(safety, "SHAKE_HAND_S", 0.2)
+    tele, dog, robot = make()
+    tele.action("shake_hand")                 # lying: ignored
+    assert robot.calls_named("shakeHand") == []
+    tele.action("stand")
+    drive(tele, dog, {"forward"}, 0.1)
+    tele.action("shake_hand")
+    assert robot.calls_named("shakeHand") and "shaking hands" in tele.message
+    drive(tele, dog, {"forward"}, 0.1)        # holding W during the trick: nothing moves
+    assert tele.state().cmd == (0.0, 0.0, 0.0)
+    import time; time.sleep(0.25)
+    dog.tick()                                # re-stand happens here
+    assert robot.calls[-1][0] == "standUp" or len(robot.calls_named("standUp")) == 2
+    drive(tele, dog, {"forward"}, 0.2)        # stand-up pause is 0 in these tests
+    assert tele.state().cmd[0] > 0 and "hold W/A/S/D" in tele.message
