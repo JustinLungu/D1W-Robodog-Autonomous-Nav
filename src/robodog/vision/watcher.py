@@ -31,6 +31,7 @@ class ObstacleWatcher:
         self.camera = LatestFrameReader(source)
         self._lock = threading.Lock()
         self._result: ObstacleResult | None = None
+        self._frame = None         # the camera frame the result belongs to (for drawing it)
         self._stamp = 0.0          # arrival time of the frame the result belongs to
         self._fps = 0.0
         self.error: str | None = None
@@ -53,7 +54,7 @@ class ObstacleWatcher:
                 res = self.checker.check(self.estimator.predict(frame))
                 now = time.monotonic()
                 with self._lock:
-                    self._result, self._stamp = res, stamp
+                    self._result, self._stamp, self._frame = res, stamp, frame
                     dt = now - t_prev
                     self._fps = 1.0 / dt if self._fps == 0.0 else 0.8 * self._fps + 0.2 / dt
                 t_prev = now
@@ -66,6 +67,11 @@ class ObstacleWatcher:
         with self._lock:
             age = time.monotonic() - self._stamp if self._result is not None else float("inf")
             return self._result, age, self._fps
+
+    def view(self):
+        """(analysed frame, its verdict), both None until the first check: to draw what was decided."""
+        with self._lock:
+            return self._frame, self._result
 
     def close(self):
         self._running = False

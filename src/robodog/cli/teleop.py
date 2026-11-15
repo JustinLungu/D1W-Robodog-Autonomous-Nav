@@ -5,7 +5,8 @@
     uv run robodog-teleop --allow-motion --record --note "hallway, chair legs"
                                             # also record camera video + commands (see recorder.py)
     uv run robodog-teleop --allow-motion --obstacles
-                                            # also WARN about obstacles ahead (camera + Depth Anything).
+                                            # also WARN about obstacles ahead (camera + Depth Anything),
+                                            # with the camera picture and what it detects in the window.
                                             # It only shows a message; it does NOT stop the robot.
 
 Needs allow_motion: true in config.machine.yaml AND --allow-motion (not for --fake).
@@ -39,6 +40,7 @@ from .status import MODES
 RATE_HZ = 30
 
 W, H = 560, 430
+VIEW_H = W * 9 // 16   # --obstacles: camera picture above the panel (16:9, window width)
 BG, FG, DIM = (24, 26, 30), (230, 230, 230), (120, 124, 132)
 GREEN, AMBER, RED, BLUE = (80, 200, 120), (240, 180, 60), (235, 70, 70), (90, 160, 240)
 
@@ -62,7 +64,23 @@ def key_maps():
     return hold, click
 
 
+def camera_view(watcher, ocfg):
+    """The analysed camera frame with the obstacle marks (path lines, yellow box, red/orange...),
+    scaled to the window width, as a pygame surface; None until the first check."""
+    import cv2
+    import pygame as pg
+
+    from ..vision.obstacles import draw_overlay
+
+    frame, res = watcher.view()
+    if frame is None or res is None:
+        return None
+    img = cv2.resize(draw_overlay(frame, res, ocfg), (W, VIEW_H), interpolation=cv2.INTER_AREA)
+    return pg.surfarray.make_surface(cv2.cvtColor(img, cv2.COLOR_BGR2RGB).swapaxes(0, 1))
+
+
 def draw(screen, fonts, st, status, fake, rec=None, obstacle=None):
+    """The status panel (W x H). The caller shows it (pg.display.flip())."""
     import pygame as pg
 
     big, mid, small = fonts
@@ -121,15 +139,17 @@ def draw(screen, fonts, st, status, fake, rec=None, obstacle=None):
 
     if not pg.key.get_focused():
         screen.blit(mid.render("click this window to control", True, AMBER), (20, H - 36))
-    pg.display.flip()
 
 
-def run(dog: SafeDog, fake: bool, rec: Recorder | None = None, watcher=None):
+def run(dog: SafeDog, fake: bool, rec: Recorder | None = None, watcher=None, ocfg=None):
     import pygame as pg
 
     pg.init()
     pg.key.set_repeat()  # no key repeat: one KEYDOWN per physical press
-    screen = pg.display.set_mode((W, H))
+    # With the obstacle warning: the camera picture on top, the usual panel below it.
+    view_h = VIEW_H if watcher is not None else 0
+    screen = pg.display.set_mode((W, view_h + H))
+    panel = screen.subsurface((0, view_h, W, H))
     pg.display.set_caption("robodog teleop" + (" (FAKE)" if fake else ""))
     fonts = (pg.font.SysFont("dejavusans", 34, bold=True), pg.font.SysFont("dejavusans", 20),
              pg.font.SysFont("dejavusans", 15))
@@ -141,6 +161,7 @@ def run(dog: SafeDog, fake: bool, rec: Recorder | None = None, watcher=None):
     last = time.monotonic()
     last_fault = None
     banner, last_level = ObstacleBanner(), None
+    view, view_res = None, None   # camera surface, and the verdict it was drawn for
     try:
         while not tele.quit:
             for ev in pg.event.get():
@@ -191,8 +212,15 @@ def run(dog: SafeDog, fake: bool, rec: Recorder | None = None, watcher=None):
                     near = f" near={res.nearness:.2f}" if res is not None and level == "warn" else ""
                     rec.event(f"obstacle_{level}{near}")
                 last_level = level
+                if res is not view_res:   # a new check: redraw the picture (not 30 times a second)
+                    view, view_res = camera_view(watcher, ocfg), res
 
-            draw(screen, fonts, st, status, fake, rec, obstacle)
+            if view_h:
+                screen.fill(BG, (0, 0, W, view_h))
+                if view is not None:
+                    screen.blit(view, (0, 0))
+            draw(panel, fonts, st, status, fake, rec, obstacle)
+            pg.display.flip()
             clock.tick(RATE_HZ)
     finally:
         print("lying down and closing...")
@@ -251,7 +279,7 @@ def main():
         })
         print(f"recording to {rec.dir}" + ("" if camera else " (commands only, no video)"))
 
-    watcher = None
+    watcher, ocfg = None, None
     if args.obstacles:
         source = args.camera or (None if args.fake else f"rtsp://{cfg.network.robot_ip}:8554/test")
         if source is None:
@@ -260,15 +288,16 @@ def main():
         from ..vision.watcher import ObstacleWatcher
 
         print("loading the depth model for the obstacle warning...")
+        ocfg = from_settings(cfg.obstacles)
         try:
-            watcher = ObstacleWatcher(source, from_settings(cfg.obstacles))
+            watcher = ObstacleWatcher(source, ocfg)
         except RuntimeError as e:   # camera could not be opened
             raise SystemExit(f"obstacle warning: {e}")
         print(f"obstacle warning on ({watcher.estimator.device}). It only warns; it does NOT stop the robot.")
 
     print("window open: click it, then R to stand up. Esc to quit.")
     try:
-        run(dog, args.fake, rec, watcher)  # lies the robot down before returning
+        run(dog, args.fake, rec, watcher, ocfg)  # lies the robot down before returning
     except KeyboardInterrupt:
         print("\nCtrl+C")
     finally:
