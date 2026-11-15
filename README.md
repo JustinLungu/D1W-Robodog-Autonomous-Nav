@@ -364,6 +364,45 @@ Rough speed of the `small` model (default input: 308 px on CPU, 518 px on GPU):
 
 > If `uv run pytest` fails with `No module named 'lark'`, your shell has ROS sourced, and pytest is loading ROS's plugin. Run `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run pytest` instead.
 
+### 6.7 Go to a clicked goal (`robodog-goto`)
+Click a spot on the floor in the robot's camera view; **hold G** and the robot drives there. Let go and it stops (the goal is kept). Everything goes through `SafeDog`, and all the teleop keys still work in the same window.
+
+How it works:
+1. **Click → floor point.** From the camera's height, tilt and lens ([camera_model.py](src/robodog/camera_model.py)) the clicked pixel becomes e.g. "1.51 m ahead, 0.51 m left". Clicks at or above the horizon are refused (not floor).
+2. **The goal is stored in the robot's own position frame** (`getPosition()` + heading), so it stays put while the robot moves, also after it has slid out of view under the robot's nose.
+3. **Hold G:** turn on the spot if the goal is more than 25° off, otherwise drive and steer toward it, slow down near it ([goto.py](src/robodog/goto.py)). It **stops short, facing the goal**: the robot's middle stops `stop_before_m` (0.55 m) before the clicked point, so with the lens 0.40 m in front of the middle, the **nose ends ~15 cm in front of the object** instead of driving over it. `stop_before_m: 0` drives the middle onto the point (within `arrive_m`, 10 cm).
+4. **The window redraws the goal from the position estimate every frame.** If the ring slides off the real spot while driving, the geometry or the odometry is off.
+5. **Cyan arcs on the floor** mark 0.5 / 1 / 1.5 / 2 / 3 m **from the point under the camera** (how you measure with a tape): if the camera values are right, a tape measure agrees with them. All distances shown in the window count from there too; internally the robot steers its middle (0.40 m behind the lens).
+
+| Key | |
+|---|---|
+| **click the floor** | set the goal |
+| **hold G** | go to the goal (let go = stop) |
+| **hold W/S A/D Q/E** | drive by hand, like teleop (overrides G) |
+| **R** / **F** / **H** | stand / lie down / handshake |
+| **C** | clear the goal |
+| **K** | calibrate: click the bases of objects at the `--calib-distances` (default `1.5,2.5,3.0` m, measured on the floor from the point under the lens), in that order |
+| **SPACE** / **Esc** | e-stop / lie down and quit |
+
+Limits (`goto:` in [config.local.yaml](config.local.yaml)): goals over **3 m** refused, **0.15 m/s** and **0.3 rad/s** max, **20 s** driving timeout, stops if the position estimate jumps (> 0.5 m in one step).
+
+**Out of view = driving blind.** The camera can't see the floor closer than ~1.5 m, so the last part is driven from a position estimate alone. Two safety/fallback features for that:
+- **Overshoot guard:** go-to counts the forward driving it has *commanded* (speed × time). If that exceeds what the goal needed × 1.25 + 0.4 m, it stops (`[overshoot guard]`), whatever the position estimate says.
+- **`goto.odometry`:** `"robot"` = the robot's own estimate (`getPosition()`); `"commanded"` = our count (commanded speed × time along the IMU heading). While G is held, the terminal prints both every 0.5 s (`commanded .. m, robot estimate .. m`), and the panel shows them too. If the robot's estimate lags or stays at 0 while it clearly drives, switch to `"commanded"`. In `"commanded"` mode, hand driving (WASD) clears the goal, because the count only knows go-to's own commands.
+
+**Try it without the robot first:** a simulated robot on a drawn floor:
+```bash
+uv run --extra vision-gpu robodog-goto --fake
+```
+R, click inside the cyan arcs, hold G: the ring moves as the simulated robot turns and drives to it.
+
+**On the robot**, in this order (step-by-step in [TESTING.md](TESTING.md), stage 4):
+1. **View only** (nothing moves): `uv run --extra vision-gpu robodog-goto`. Click the floor: it shows the distance.
+2. **Measure** with the robot standing: the lens height above the floor (`camera.height_m`) and how far the lens is in front of the robot's centre (`camera.forward_offset_m`). Put both in `config.local.yaml`. **All distances are from the robot's centre** (middle of the body): that's the point it turns around and the one its position estimate tracks.
+3. **Calibrate:** put objects at **1.5, 2.5 and 3.0 m** (measured on the floor from the point **under the camera lens**; one can be off to the side). Press **K** and click each object's base in that order. It fits the **tilt, field of view and lens type together** (one point can only fix the tilt, and AgiBot's lens spec turned out not to match our camera) and applies them right away: check the cyan arcs against the objects. The terminal prints `lens`, `hfov_deg` and `pitch_deg`; put them in `config.local.yaml`. Our camera looks **up** (negative pitch), so the floor is only visible from ~1–1.5 m ahead.
+4. **Check:** bottles at 1, 2 and 2.5 m, click each: the shown distance should be within ~10 %. Then set `camera.measured: true`. **G only drives once that's true.**
+5. **Drive:** `uv run --extra vision-gpu robodog-goto --allow-motion` (motion on in `config.machine.yaml`). R, click a spot 1 m ahead, hold G.
+
 ---
 
 ## 7. Safety layer (`robodog` package)

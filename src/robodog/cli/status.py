@@ -7,13 +7,14 @@
 from __future__ import annotations
 
 import argparse
+import math
 import time
 
 from ..config import load_config
 from ..safety import SafeDog
 from ..sdk import make_highlevel
 
-MODES = {0: "lying, motors damped", 1: "standing", 3: "moving", 51: "crouched (lieDown)"}
+MODES = {0: "lying, motors damped", 1: "standing", 3: "moving", 18: "standing/moving", 51: "crouched (lieDown)"}
 
 
 def main():
@@ -34,9 +35,11 @@ def main():
             st = dog.status()
             low = "  <-- LOW, charge before moving" if st["battery"] < cfg.safety.min_battery else ""
             r, p, y = st["rpy"]
+            px, py, pz = st["position"]
             print(
                 f"connected={st['connected']}  battery={st['battery']}%{low}  "
-                f"mode={st['mode']} ({MODES.get(st['mode'], '?')})  rpy=({r:+.2f}, {p:+.2f}, {y:+.2f})"
+                f"mode={st['mode']} ({MODES.get(st['mode'], '?')})  rpy=({r:+.2f}, {p:+.2f}, {y:+.2f})  "
+                f"pos=({px:+.2f}, {py:+.2f}, {pz:+.2f}) m  heading={math.degrees(y):+.0f} deg"
             )
             if not args.watch:
                 break

@@ -133,7 +133,16 @@ class SafeDog:
             "battery": int(self.robot.getBatteryPower()),      # 0-100 %
             "mode": int(self.robot.getCurrentCtrlmode()),      # vendor doc: 0 limp, 1 standing, 3 moving (unverified)
             "rpy": list(self.robot.getRPY()),                  # roll, pitch, yaw in radians
+            "position": list(self.robot.getPosition()),        # x, y, z in m (robot's own estimate, drifts)
         }
+
+    def pose(self) -> tuple[float, float, float]:
+        """(x, y, yaw): the robot's own position estimate (m) and heading (rad, + = turned left).
+
+        Read-only. Odometry: good over a few metres, drifts over longer drives.
+        """
+        x, y = self.robot.getPosition()[:2]
+        return float(x), float(y), float(self.robot.getRPY()[2])
 
     def settled(self) -> bool:
         """True once a stand() has finished its STAND_SETTLE_S transition (motion commands accepted)."""

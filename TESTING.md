@@ -277,6 +277,59 @@ uv run --extra vision-gpu robodog-stand-test --allow-motion
 ```
 **See:** after ENTER, `refused: battery ..% is below min_battery 25%; charge first`. The robot does **not** stand.
 
+## Stage 4: Go to a clicked goal (`robodog-goto`)
+
+Only after stages 1–2 pass. All in **one window**: `robodog-goto` has the teleop keys too, and only one program can be connected to the robot at a time.
+Panel at the bottom: `pose x .. y .. m, heading .. deg` is the robot's own position estimate; `goal .. m, .. deg [state]` is the goal relative to the robot.
+
+### Test 17: Try it on the fake robot
+```bash
+uv run --extra vision-gpu robodog-goto --fake
+```
+R, wait, click a spot inside the cyan arcs, hold **G**. **See:** `GOING (turning)` / `GOING (driving)`, the ring moves toward the middle-bottom as the simulated robot approaches, then `[arrived]`. Release G halfway once: it pauses and continues when you hold G again.
+
+### Test 18: Position estimate (pose) check
+**Goal:** the position the go-to relies on is in metres, forward is +x, and turning left is + heading.
+1. Tape mark at the robot's front wheels.
+2. ```bash
+   uv run --extra vision-gpu robodog-goto --allow-motion
+   ```
+   R, wait for standing. Write down `pose x, y, heading` from the panel.
+3. Hold **W** ~3 s (hand driving). Measure the real distance from the mark. **See:** `pose x` (or the distance from the start values) grew by about the measured distance; heading about the same.
+4. Hold **A** ~2 s. **See:** heading **increases** (turning left = +).
+5. F, Esc.
+
+**Pass:** distance within ~10 %, forward and left signs as described. **If the signs are different, stop and tell us** (go-to would steer the wrong way).
+If `pose x / y` barely moves (or not at all) while the robot clearly drives, the robot's position estimate can't be used for go-to: set `odometry: "commanded"` in the `goto:` section of `config.local.yaml`.
+
+### Test 19: Measure the camera and calibrate the tilt
+1. `robodog-goto --allow-motion`, **R** (standing; G stays disabled while `measured: false`).
+2. Measure with a tape: **lens height** above the floor (centre of the lens) and **lens distance in front of the robot's centre** (centre = middle of the body, between the wheels). Write both into `camera.height_m` and `camera.forward_offset_m` in `config.local.yaml`.
+3. **Esc**, restart `robodog-goto --allow-motion`, **R**.
+4. Put objects (cans, bottles) at **1.5, 2.5 and 3.0 m**, measured on the floor from the point **directly under the camera lens** (one of them a bit off to the side is fine).
+5. Press **K**, then click each object **where it touches the floor**, in the order 1.5, 2.5, 3.0 m. **See:** `fit: <lens>, hfov .., pitch .. | 1.50->1.5x ...` and the cyan arcs moving onto the objects. The terminal prints three lines (`lens`, `hfov_deg`, `pitch_deg`): put them in the camera section of `config.local.yaml`. Worst error should be under ~5 %.
+6. Also note where the **bottom edge of the image** is on the floor (slide a bottle toward the nose until it disappears): that's the blind zone.
+
+### Test 20: Distance check
+Restart `robodog-goto --allow-motion`, **R**. Objects at **2.0 m** straight ahead and **2.0 m about 45° to the side** (distances that weren't used for calibrating). Click each base. **See:** `floor point: .. m from under the camera`.
+
+**Pass:** within ~10 % of the tape. Then set `camera.measured: true` in `config.local.yaml`.
+
+### Test 21: First go-to (1 m straight ahead)
+1. `robodog-goto --allow-motion`, **R**, wait.
+2. Click a floor spot about **1 m** straight ahead (put a piece of tape there).
+3. Hold **G**. **See:** `GOING (driving)`, it drives slowly (0.15 m/s) toward the tape and stops **short of it, facing it**: `[arrived]` with `goal 0.5x m`. The nose should end ~15 cm in front of the tape (`stop_before_m: 0.55`).
+4. **Measure** the gap between the robot's nose and the tape. Watch the terminal while G is held: `commanded .. m, robot estimate .. m` should grow together. If the robot estimate stays far behind and it overshoots / `[overshoot guard]` stops it, switch to `odometry: "commanded"` and repeat.
+5. Repeat: let go of **G** halfway (stops), hold again (continues). Once: **SPACE** while it's driving (stops, lies down).
+
+**Pass:** nose ends 5–25 cm in front of the tape, never on top of it; releasing G stops it; SPACE works. Only after this, try a real object (the can) as the goal.
+
+### Test 22: Goals to the side and further away
+Spots at **1.5 m, 45° left**; **1.5 m, 45° right**; then **2.5 m** ahead.
+**See:** for the side goals `GOING (turning)` first (on the spot), then driving. Watch the ring: it should stay on the tape mark while the robot turns and drives.
+
+**Pass:** stops facing the mark with the nose 5–30 cm in front of it each time. Note how far off it is at 2.5 m (odometry and calibration errors grow with distance).
+
 ---
 
 ## End of every session
@@ -288,7 +341,7 @@ sed -i 's/^allow_motion: true/allow_motion: false/' config.machine.yaml && grep 
 ---
 
 ## Gate before anything autonomous (click-to-go, following, litter pickup)
-- Tests 1–15 pass, 3 times each.
+- Tests 1–15 pass, 3 times each (and 17–22 for go-to).
 - The worst-case roll distance from tests 12–13 is known and small.
 - Hold-to-run exists ✅ (teleop). Autonomous code needs its own equivalent (e.g. hold a key to let it drive).
 
@@ -315,3 +368,9 @@ Copy a row per run. Times in seconds, distances in metres.
 | | 14 range | — | | 2 m: ; 5 m: ; 10 m: ; wall: | |
 | | 15 repeat (3 s hold) | 1–3 | | | |
 | | 16 low battery | 1 | | | |
+| | 17 go-to fake | — | | | |
+| | 18 pose check | 1 | | W 3 s: real / pose: ; A: heading sign: | |
+| | 19 camera | — | | height_m: ; offset_m: ; pitch_deg: ; blind zone: | |
+| | 20 distances | — | | 1 m: ; 2 m: ; 2.5 m: ; side: | |
+| | 21 go-to 1 m | 1 | | stop error: | |
+| | 22 go-to side / 2.5 m | 1 | | 45L: ; 45R: ; 2.5 m: | |

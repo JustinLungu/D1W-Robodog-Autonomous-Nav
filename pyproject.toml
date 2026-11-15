@@ -18,6 +18,7 @@ dependencies = [
 robodog-status = "robodog.cli.status:main"
 robodog-stand-test = "robodog.cli.stand_test:main"
 robodog-teleop = "robodog.cli.teleop:main"
+robodog-goto = "robodog.cli.goto:main"
 robodog-depth = "robodog.cli.depth:main"
 
 # Computer vision extras. Pick ONE (they pull different PyTorch builds):

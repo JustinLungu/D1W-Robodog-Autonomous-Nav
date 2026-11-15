@@ -63,9 +63,34 @@ class SafetyConfig:
 
 
 @dataclass
+class CameraConfig:
+    """Front camera geometry, for turning a clicked pixel into a floor point (see camera_model.py)."""
+    lens: str                # "fisheye" or "pinhole"
+    hfov_deg: float
+    height_m: float          # lens height above the floor, robot standing
+    pitch_deg: float         # downward tilt of the lens
+    forward_offset_m: float  # lens distance in front of the robot's centre
+    measured: bool           # false until height/offset are measured and pitch calibrated
+
+
+@dataclass
+class GoToConfig:
+    """Limits for driving to a clicked goal (robodog-goto)."""
+    max_goal_m: float        # refuse goals further away than this
+    max_vx: float            # m/s, below safety.max_vx
+    max_yaw: float           # rad/s, below safety.max_yaw
+    arrive_m: float          # "arrived" when this close
+    timeout_s: float         # give up after this much driving time
+    stop_before_m: float     # stop the robot's middle this far short of the goal, facing it
+    odometry: str            # "robot" (getPosition) or "commanded" (speed x time along the IMU heading)
+
+
+@dataclass
 class Config:
     network: NetworkConfig
     safety: SafetyConfig
+    camera: CameraConfig
+    goto: GoToConfig
     sdk_dir: Path  # from config.machine.yaml
 
 
@@ -143,7 +168,7 @@ def load_config(path: str | Path | None = None, machine_path: str | Path | None 
     raw = yaml.safe_load(path.read_text()) or {}
     machine = _load_machine(machine_path)
 
-    unknown = raw.keys() - {"network", "safety"}
+    unknown = raw.keys() - {"network", "safety", "camera", "goto"}
     misplaced = unknown & _MACHINE_KEYS.keys()
     misplaced |= {k for k in ("laptop_ip",) if isinstance(raw.get("network"), dict) and k in raw["network"]}
     misplaced |= {k for k in ("allow_motion",) if isinstance(raw.get("safety"), dict) and k in raw["safety"]}
@@ -164,5 +189,7 @@ def load_config(path: str | Path | None = None, machine_path: str | Path | None 
     return Config(
         network=net,
         safety=_build(SafetyConfig, {**safety, "allow_motion": machine["allow_motion"]}, "safety", path),
+        camera=_build(CameraConfig, raw.get("camera"), "camera", path),
+        goto=_build(GoToConfig, raw.get("goto"), "goto", path),
         sdk_dir=sdk_dir,
     )

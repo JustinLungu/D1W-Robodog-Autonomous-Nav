@@ -19,3 +19,26 @@ safety:
   cmd_timeout: 0.3     # s - velocity resets to 0 if your code stops updating it (dead-man switch)
   connect_timeout: 5.0 # s - give up connecting after this
   battery_check_period: 1.0  # s
+
+camera:
+  # Front camera geometry, used by robodog-goto to turn a clicked pixel into a floor point.
+  # Measure with the robot STANDING, then calibrate the pitch in robodog-goto (key K).
+  lens: "fisheye"
+  hfov_deg: 96.0          # fitted with K (3 objects, worst 3 %)
+  height_m: 0.40           # measured 2026-11-15: floor to lens centre, robot standing
+  pitch_deg: -8.7         # fitted with K: looking 8.7 deg up
+  forward_offset_m: 0.4        # measured: lens in front of the robot's centre
+  measured: true          # set true once the three values above are real: go-to driving needs it
+
+goto:
+  max_goal_m: 3.0          # refuse clicked goals further away than this
+  max_vx: 0.15             # m/s (safety.max_vx still caps it)
+  max_yaw: 0.3             # rad/s (safety.max_yaw still caps it)
+  arrive_m: 0.10           # stop when this close to the goal
+  timeout_s: 20.0          # stop if not there after this much driving
+  stop_before_m: 0.55      # robot's MIDDLE stops this far short of the clicked point, facing it:
+                           # with the lens 0.40 m in front of the middle, the nose ends ~15 cm before
+                           # the target instead of driving over it. 0 = drive the middle onto the point
+  odometry: "robot"        # where go-to thinks the robot is: "robot" = its own estimate (getPosition),
+                           # "commanded" = our count (speed x time along the IMU heading). Try "commanded"
+                           # if it overshoots once the goal is out of view (see TESTING.md test 18)
