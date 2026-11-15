@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .safety import MIN_VX, MIN_VY, MIN_YAW, SafeDog, SafetyError
+from .safety import MIN_CRAWL_VX, MIN_VX, MIN_VY, MIN_YAW, SafeDog, SafetyError
 
 # Hold keys -> (axis, sign). Axis 0 = vx (forward), 1 = vy (sideways left), 2 = yaw (turn left).
 MOTION = {
@@ -105,8 +105,8 @@ class Teleop:
                     return
                 on = not self.dog.crawling
                 self.dog.set_crawl(on)   # refused (message below) while standing up / moving
-                self.message = ("lowering the body... (keys ignored ~2 s)" if on
-                                else "raising the body... (keys ignored ~2 s)")
+                self.message = ("lowering the body... (keys ignored ~4 s)" if on
+                                else "raising the body... (keys ignored ~3 s)")
             elif name == "shake_hand":
                 if not self.standing:
                     return
@@ -129,7 +129,7 @@ class Teleop:
         """Speed wanted from the keys held right now (before ramping)."""
         frac = SPEED_LEVELS[self.level]
         caps = self.dog.speed_caps()   # the crawl caps while crawling
-        mins = (MIN_VX, MIN_VY, MIN_YAW)
+        mins = (MIN_CRAWL_VX if self.dog.crawling else MIN_VX, MIN_VY, MIN_YAW)
         out = [0.0, 0.0, 0.0]
         for name in self.held:
             axis, sign = MOTION[name]
@@ -156,6 +156,7 @@ class Teleop:
             return
         if self.message.startswith(("standing up", "shaking hands", "lowering the body", "raising the body")):
             self.message = ("CRAWLING (body low). drive as usual, X to stand tall" if self.dog.crawling
+                            else f"{self.dog.crawl_error}. hold W/A/S/D to drive" if self.dog.crawl_error
                             else "standing. hold W/A/S/D (or arrows) to drive")
         tgt = self.target()
         for i in range(3):

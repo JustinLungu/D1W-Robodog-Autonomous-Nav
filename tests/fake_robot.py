@@ -21,6 +21,7 @@ class FakeHighLevel:
         self.battery = battery
         self.connected = connected
         self.mode = MODE_PASSIVE
+        self.sdk_state = None        # last accepted state command (see crawl())
         self.calls: list[tuple] = []
         self.verbose = verbose
         self._lock = threading.Lock()
@@ -61,17 +62,20 @@ class FakeHighLevel:
     # --- motion (returns 0 = OK, like the real SDK) ---
     def standUp(self):
         self._record("standUp")
+        self.sdk_state = "standUp"
         self.mode = MODE_STAND
         return 0
 
     def lieDown(self):
         self._record("lieDown")
+        self.sdk_state = "lieDown"
         self.mode = MODE_PASSIVE
         self._vel = (0.0, 0.0, 0.0)
         return 0
 
     def passive(self):
         self._record("passive")
+        self.sdk_state = "passive"
         self.mode = MODE_PASSIVE
         self._vel = (0.0, 0.0, 0.0)
         return 0
@@ -82,10 +86,36 @@ class FakeHighLevel:
 
     def shakeHand(self):
         self._record("shakeHand")
+        self.sdk_state = "shakeHand"
         return 0
+
+    # The real SDK's state machine (strings in libmc_sdk_zsl_1w): crawl() only right after
+    # standUp() ("must transition to 'standUp' first"; after move() the robot is "running"),
+    # and while crawling move() is refused ("in crawl state") until cancelCrawl().
+    SDK_REFUSED = 12295   # the code the real library returns for a refused transition
+
+    def crawl(self, vx, vy, yaw_rate):
+        self._record("crawl", float(vx), float(vy), float(yaw_rate))
+        if self.sdk_state not in ("standUp", "crawl"):
+            return self.SDK_REFUSED
+        self.sdk_state = "crawl"
+        if self.simulate:
+            with self._lock:
+                self._integrate()
+                self._vel = (float(vx), float(vy), float(yaw_rate))
+        return 0
+
+    def cancelCrawl(self):
+        self._record("cancelCrawl")
+        self._vel = (0.0, 0.0, 0.0)
+        if self.sdk_state == "crawl":
+            self.sdk_state = "cancelCrawl"
 
     def move(self, vx, vy, yaw_rate):
         self._record("move", float(vx), float(vy), float(yaw_rate))
+        if self.sdk_state == "crawl":
+            return self.SDK_REFUSED            # "Cannot transition to 'move' state: in crawl state."
+        self.sdk_state = "move"
         if self.simulate:
             with self._lock:
                 self._integrate()

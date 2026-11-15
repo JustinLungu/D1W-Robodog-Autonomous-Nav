@@ -529,17 +529,19 @@ The go-to window (§6.7) then shows the tracked boxes. **Click a box** and **hol
 
 Each detection is placed using the pose the robot had when that frame was taken (`trash.camera_delay_s` ago), so the robot's own movement in between cancels out. Clicking the floor instead of a box still sets an ordinary fixed goal.
 
-**Crawling while following:** with `trash.crawl_to_target: true` (default), holding G on a tracked piece first **lowers the body** (the window shows `LOWERING...`, about 2 s, standing still), then follows it at crawl speed. While the body is low, all distances use `camera.crawl_height_m` (0.20, a first guess: measure it). `--posture crawl` sets that height without lowering the body (for `--fake` or recordings). The camera's tilt is assumed the same in both postures.
+**Crawling while following:** with `trash.crawl_to_target: true` (default), holding G on a tracked piece first **switches to the crawl gait** (the window shows `LOWERING...`, about 4 s, standing still), then follows it at crawl speed (`trash.follow_vx` 0.12 m/s; `crawl()` ignores less than 0.1). While crawling, all distances use `camera.crawl_height_m` (0.20, a first guess: measure it). `--posture crawl` sets that height without crawling (for `--fake` or recordings). The camera's tilt is assumed the same in both postures. If the robot refuses `crawl()`, it follows standing instead (X retries).
 
 #### Crawling (X in `robodog-teleop` and `robodog-goto`)
-**X** lowers the body; **X** again raises it. Only while standing still; it takes `crawl.change_s` (2 s), and keys are ignored meanwhile. Lying down (F), the e-stop, or a new stand-up (R) always end up at normal height.
+**X** switches to the SDK's low crawl gait; **X** again stands tall. Only while standing still; keys are ignored during the change (~4 s down, ~3 s up). Lying down (F), the e-stop, or a new stand-up (R) always end up at normal height.
 
-How: the SDK's `crawl()` had no effect on our robot (tested 2026-11-15). So SafeDog lowers the body with `attitudeControl(0, 0, 0, height_vel)` ("body height change while standing" in the vendor docs) for `crawl.change_s` seconds, then drives with the normal `move()`, under the slower caps in the `crawl:` section of `config.local.yaml` (0.15 m/s, 0.10 m/s sideways, 0.30 rad/s). The robot stops lowering at its own limit.
+How: the SDK library has a state machine (its messages are inside `libmc_sdk_zsl_1w`): `crawl()` is only accepted right after `standUp()` (`must transition to 'standUp' first`; after `move()` the robot counts as running, mode 18), and while crawling `move()` is refused (`in crawl state`) until `cancelCrawl()`. Our first attempt switched from `move()` straight to `crawl()`, so it was refused; lowering with `attitudeControl()` only bent it briefly, because the next `move()` stood it back up. Now SafeDog:
+1. **X on:** `standUp()`, sends nothing for `crawl.settle_s` (2 s), then `crawl(0, 0, 0)` for `crawl.change_s` (2 s) while the body goes down. Then it drives with `crawl(vx, vy, yaw)` only, under the `crawl:` caps (0.15 m/s, 0.10 m/s sideways, 0.30 rad/s).
+2. **X off:** `crawl(0, 0, 0)`, `cancelCrawl()`, `standUp()`, nothing for 3 s, then `move()` as usual.
+3. **Refused:** if every `crawl()` during step 1 returns an error, it logs the code once, goes back to standing, and the window says so.
 
-**Untested on the robot.** On the first try (standing, remote in hand, speed level 1), check:
-- **Does the body go down?** If not, raise `crawl.height_vel` (vendor max 0.5) or `crawl.change_s`.
-- **Does it stay down while driving with `move()`?** If it pops back up, tell me: the posture may need to be held differently.
-- **How high is the camera when low?** Measure it into `camera.crawl_height_m`, or the distances will be off.
+The terminal logs the robot's own body height (`getPosition` z) and mode at each switch: use the difference to set `camera.crawl_height_m` (camera height standing minus how much the body dropped).
+
+**Untested on the robot.** On the first try (standing, remote in hand, speed level 1), check: does it go down and stay down while driving, which mode does the terminal log, and does X bring it back up.
 
 ---
 

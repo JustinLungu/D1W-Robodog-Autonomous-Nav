@@ -51,6 +51,7 @@ class GoToLimits:
     timeout_s: float
     stop_before_m: float = 0.0  # stop the robot's middle this far short of the goal (nose in front of it)
     odometry: str = "robot"     # "robot" (getPosition) or "commanded" (speed x time along the IMU heading)
+    min_vx: float = MIN_VX      # the SDK's smallest forward speed (MIN_CRAWL_VX while crawling)
 
 
 @dataclass
@@ -190,7 +191,7 @@ class GoTo:
 
         self.state = "driving"
         vx = min(self.lim.max_vx, K_V * (dist - stop))
-        vx = max(vx, MIN_VX * 1.2)        # below the SDK minimum the robot wouldn't move at all
+        vx = max(vx, self.lim.min_vx * 1.2)   # below the SDK minimum the robot wouldn't move at all
         if abs(yaw) < MIN_YAW:
             yaw = 0.0                      # tiny corrections: the SDK ignores them anyway
         self._last_vx = vx

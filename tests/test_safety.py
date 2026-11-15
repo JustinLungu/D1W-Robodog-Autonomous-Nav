@@ -362,7 +362,7 @@ def test_error_warning_says_mode_and_time_since_last_posture_command():
     assert "robot mode 1" in warning and "3.05 s after standUp" in warning
 
 
-# ---------------------------------------------------------------- crawl (body lowered)
+# ---------------------------------------------------------------- crawl (the SDK's crawl gait)
 from robodog import safety as _safety
 
 
@@ -374,53 +374,90 @@ def settled_dog():
     return dog, robot, clock
 
 
-def attitudes(robot):
-    return [c[1:] for c in robot.calls_named("attitudeControl")]
+def crawls(robot):
+    return [c[1:] for c in robot.calls_named("crawl")]
 
 
-def test_crawl_lowers_the_body_then_drives_with_move():
-    dog, robot, clock = settled_dog()
+def enter_crawl(dog, robot, clock):
+    """X: standUp, pause, crawl(0,0,0) while the body goes down, then crawling."""
     c = dog.cfg.crawl
     dog.set_crawl(True)
+    clock.advance(c.settle_s + 0.01)
+    dog.tick()                                    # prep over -> lower
+    dog.tick()
+    clock.advance(c.change_s + 0.01)
+    dog.tick()                                    # lower over -> crawling
+
+
+def test_crawl_restands_then_switches_to_the_crawl_gait():
+    dog, robot, clock = settled_dog()
+    c = dog.cfg.crawl
+    n_stand = len(robot.calls_named("standUp"))
+    dog.set_crawl(True)
+    assert len(robot.calls_named("standUp")) == n_stand + 1      # crawl() needs the standUp state
     assert dog.crawling and dog.body_moving and not dog.settled()
     with pytest.raises(SafetyError):
-        dog.set_velocity(0.1)                         # no driving while the body moves
+        dog.set_velocity(0.15)                    # no driving during the change
     n_moves = len(moves(robot))
     dog.tick()
-    assert attitudes(robot)[-1] == (0.0, 0.0, 0.0, -c.height_vel)   # lowering, instead of move()
+    assert crawls(robot) == [] and len(moves(robot)) == n_moves  # pause after standUp: nothing sent
+    clock.advance(c.settle_s + 0.01)
+    dog.tick()
+    dog.tick()
+    assert crawls(robot)[-1] == (0.0, 0.0, 0.0)  # body going down
     assert len(moves(robot)) == n_moves
     clock.advance(c.change_s + 0.01)
     dog.tick()
-    assert not dog.body_moving and dog.crawling and dog.settled()
-    dog.set_velocity(0.1)
+    assert not dog.body_moving and dog.crawling and dog.settled() and dog.crawl_error is None
+    dog.set_velocity(0.15)
     dog.tick()
-    assert moves(robot)[-1] == (0.1, 0.0, 0.0)
+    assert crawls(robot)[-1] == (0.15, 0.0, 0.0)  # drives with crawl(), never move()
+    assert len(moves(robot)) == n_moves
+    assert all(rc == 0 for rc in [robot.crawl(0.0, 0.0, 0.0)])   # the fake accepted the sequence
 
 
-def test_crawl_has_slower_caps():
+def test_crawl_has_slower_caps_and_crawl_minimum():
     dog, robot, clock = settled_dog()
-    dog.set_crawl(True)
-    clock.advance(dog.cfg.crawl.change_s + 0.01)
-    dog.tick()
+    enter_crawl(dog, robot, clock)
     dog.set_velocity(5.0, 5.0, 5.0)
     dog.tick()
     c = dog.cfg.crawl
-    assert moves(robot)[-1] == (min(c.max_vx, 0.3), min(c.max_vy, 0.2), min(c.max_yaw, 0.5))
+    assert crawls(robot)[-1] == (min(c.max_vx, 0.3), min(c.max_vy, 0.2), min(c.max_yaw, 0.5))
     assert dog.speed_caps() == (min(c.max_vx, 0.3), min(c.max_vy, 0.2), min(c.max_yaw, 0.5))
+    dog.set_velocity(0.07)                        # fine for move(), below crawl()'s 0.1 minimum
+    dog.tick()
+    assert crawls(robot)[-1] == (0.0, 0.0, 0.0)
 
 
-def test_crawl_off_raises_the_body():
+def test_crawl_off_cancels_and_restands():
     dog, robot, clock = settled_dog()
-    dog.set_crawl(True)
-    clock.advance(dog.cfg.crawl.change_s + 0.01)
-    dog.tick()
+    enter_crawl(dog, robot, clock)
     dog.set_crawl(False)
+    names = [c[0] for c in robot.calls[-3:]]
+    assert names == ["crawl", "cancelCrawl", "standUp"]
+    assert not dog.crawling and dog.body_moving and not dog.settled()
+    n_moves = len(moves(robot))
     dog.tick()
-    assert attitudes(robot)[-1][3] == dog.cfg.crawl.height_vel   # raising
-    assert dog.crawling and dog.body_moving        # still low: crawl caps apply until it's fully up
-    clock.advance(dog.cfg.crawl.change_s + 0.01)
+    assert len(moves(robot)) == n_moves            # stand-up pause: nothing sent
+    clock.advance(_safety.STAND_SETTLE_S + 0.01)
     dog.tick()
-    assert not dog.crawling and dog.settled() and dog.speed_caps() == (0.3, 0.2, 0.5)
+    assert dog.settled() and dog.speed_caps() == (0.3, 0.2, 0.5)
+    dog.set_velocity(0.2)
+    dog.tick()
+    assert moves(robot)[-1] == (0.2, 0.0, 0.0)     # accepted again after cancelCrawl + standUp
+
+
+def test_crawl_refused_by_robot_goes_back_to_standing():
+    dog, robot, clock = settled_dog()
+    robot.crawl = lambda *a: (robot._record("crawl", *map(float, a)), 12295)[1]
+    logs = []
+    dog.log = logs.append
+    enter_crawl(dog, robot, clock)
+    assert not dog.crawling and dog.body_moving and "12295" in dog.crawl_error
+    assert sum("returned error code 12295" in m for m in logs) == 1    # logged once, not every tick
+    clock.advance(_safety.STAND_SETTLE_S + 0.01)
+    dog.tick()
+    assert dog.settled() and not dog.crawling
 
 
 def test_crawl_needs_standing_still_and_settled():
@@ -447,28 +484,28 @@ def test_crawl_needs_motion_allowed():
         dog.set_crawl(True)
 
 
-def test_lying_down_or_estop_forgets_crawl_and_next_stand_is_tall():
+def test_lie_down_while_crawling_leaves_the_crawl_gait_first():
     dog, robot, clock = settled_dog()
-    dog.set_crawl(True)
-    clock.advance(dog.cfg.crawl.change_s + 0.01)
-    dog.tick()
+    enter_crawl(dog, robot, clock)
     dog.lie_down()
+    assert [c[0] for c in robot.calls[-3:]] == ["crawl", "cancelCrawl", "lieDown"]
     assert not dog.crawling
     dog.stand()
     assert not dog.crawling
-    clock.advance(_safety.STAND_SETTLE_S + 0.1)
-    dog.tick()
-    dog.set_crawl(True)
+
+
+def test_estop_while_crawling_leaves_the_crawl_gait_first():
+    dog, robot, clock = settled_dog()
+    enter_crawl(dog, robot, clock)
     dog.estop()
-    n = len(attitudes(robot))
+    assert [c[0] for c in robot.calls[-3:]] == ["crawl", "cancelCrawl", "lieDown"]
+    n = len(robot.calls)
     dog.tick()
-    assert not dog.crawling and len(attitudes(robot)) == n   # nothing more sent after the e-stop
+    assert not dog.crawling and len(robot.calls) == n   # nothing more sent after the e-stop
 
 
 def test_no_handshake_while_crawling():
     dog, robot, clock = settled_dog()
-    dog.set_crawl(True)
-    clock.advance(dog.cfg.crawl.change_s + 0.01)
-    dog.tick()
+    enter_crawl(dog, robot, clock)
     with pytest.raises(SafetyError, match="stand tall"):
         dog.shake_hand()

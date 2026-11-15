@@ -169,37 +169,36 @@ def test_handshake_key_ignores_motion_until_standing_again(monkeypatch):
 
 def crawl_ready(change_s=0.05):
     tele, dog, robot = make()
-    dog.cfg.crawl.change_s = change_s          # real clock here: keep the body change short
+    dog.cfg.crawl.settle_s = dog.cfg.crawl.change_s = change_s   # real clock here: keep it short
     tele.action("stand")
     drive(tele, dog, set(), 0.1)
     return tele, dog, robot
 
 
-def test_x_lowers_the_body_then_drives_slower():
+def test_x_switches_to_the_crawl_gait_then_drives_slower():
     import time
     tele, dog, robot = crawl_ready()
     tele.action("crawl")
     assert dog.crawling and tele.state().crawling and tele.state().body_moving
-    drive(tele, dog, {"forward"}, 0.04)
-    assert robot.calls_named("attitudeControl")[-1][4] < 0      # lowering
-    time.sleep(0.06)
-    drive(tele, dog, set(), 0.1)                                 # change done
+    for _ in range(3):
+        time.sleep(0.06)
+        drive(tele, dog, set(), 0.1)
     assert not tele.state().body_moving and "CRAWLING" in tele.message
     tele.action("speed_3")
     drive(tele, dog, {"forward"}, 2.0)
     assert tele.state().cmd[0] == pytest.approx(min(dog.cfg.crawl.max_vx, dog.cfg.safety.max_vx))
+    assert robot.calls_named("crawl")[-1][1] > 0                 # driving with crawl()
 
 
-def test_x_again_raises_the_body():
+def test_x_again_stands_tall(monkeypatch):
     import time
     tele, dog, robot = crawl_ready()
     tele.action("crawl")
-    time.sleep(0.06)
-    drive(tele, dog, set(), 0.1)
+    for _ in range(3):
+        time.sleep(0.06)
+        drive(tele, dog, set(), 0.1)
     tele.action("crawl")
-    drive(tele, dog, set(), 0.04)
-    assert robot.calls_named("attitudeControl")[-1][4] > 0      # raising
-    time.sleep(0.06)
+    assert robot.calls_named("cancelCrawl")
     drive(tele, dog, set(), 0.1)
     assert not dog.crawling and "standing" in tele.message
 

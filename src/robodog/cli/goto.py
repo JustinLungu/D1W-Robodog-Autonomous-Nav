@@ -20,7 +20,7 @@ distances, and drive with the teleop keys.
   HOLD    G                      go to the goal. Let go = stop (the goal is kept)
   HOLD    W/S A/D Q/E (arrows)   drive by hand, like robodog-teleop (overrides G)
   CLICK   R stand   F lie down   C clear goal   1/2/3 speed (hand driving)
-          X  crawl on/off: lower / raise the body (~2 s, standing still). Distances follow the posture
+          X  crawl on/off: the SDK crawl gait (~4 s to switch, standing still). Distances follow the posture
           K  calibrate: click the bases of objects at the --calib-distances, in that order
           SPACE  E-STOP (stop + lie down, latched)    Esc  lie down and quit
 
@@ -41,7 +41,7 @@ from ..camera_model import CameraModel, fit_camera
 from ..config import REPO_ROOT, load_config
 from ..goto import GoTo, GoToLimits
 from ..target import PoseHistory, TargetFollower
-from ..safety import SafeDog, SafetyError
+from ..safety import MIN_CRAWL_VX, MIN_VX, SafeDog, SafetyError
 from ..teleop import Teleop
 from .status import MODES
 from .teleop import key_maps
@@ -129,6 +129,7 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
     follower = TargetFollower(goto, cfg.trash.lost_after_s, cfg.trash.reacquire_m)
     history = PoseHistory()
     tracks, sightings, trash_seq, trash_rate = [], [], 0, 0.0
+    shown_crawl_error = None
     if tracker is not None:
         from ..vision.trash import TrashWatcher, to_sighting
 
@@ -278,6 +279,8 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
                 if watcher is not None:   # re-place the current boxes with the new camera height
                     sightings = [to_sighting(t, model) for t in tracks]
                 message = f"camera height now {cam_height:.2f} m ({want})"
+            if dog.crawl_error and dog.crawl_error != shown_crawl_error:
+                shown_crawl_error = message = dog.crawl_error
             if watcher is not None:
                 new_tracks, stamp, seq, trash_rate = watcher.latest()
                 if seq != trash_seq:   # a new detector result: place the boxes on the floor, correct the goal
@@ -292,10 +295,12 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
                     message = watcher.error
             # Slow while going to a tracked piece, so the tracker keeps up; normal speed otherwise.
             limits.max_vx = min(base_max_vx, cfg.trash.follow_vx) if follower.track_id is not None else base_max_vx
+            limits.min_vx = MIN_CRAWL_VX if dog.crawling else MIN_VX   # crawl() ignores less than 0.1 m/s
             going = (g_held and not hand and drive_ok and tele.standing and dog.settled() and not dog.fault)
             # Going to a tracked piece: lower the body first (trash.crawl_to_target), then follow it.
+            # (Not again after the robot refused crawl(): then it follows standing. X retries.)
             if (going and cfg.trash.crawl_to_target and follower.track_id is not None and goto.goal is not None
-                    and not dog.crawling):
+                    and not dog.crawling and not dog.crawl_error):
                 going = False             # this frame: stand still (the body may only change while still)
                 try:
                     dog.set_crawl(True)
