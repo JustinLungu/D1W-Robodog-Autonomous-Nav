@@ -38,6 +38,7 @@ import numpy as np
 
 from ..camera_model import CameraModel
 from ..target import Sighting
+from .csrt import OVERLAP_IOU, SelectedBoxTracker, iou
 
 POSTURES = ("stand", "crawl")
 
@@ -53,6 +54,7 @@ class Track:
     label: str
     conf: float
     box: tuple[float, float, float, float]   # x0, y0, x1, y1 in frame pixels
+    source: str = "yolo"                     # "yolo", or "csrt": YOLO lost the selected piece, CSRT's box
 
 
 # ----------------------------------------------------------------------------- model file
@@ -238,12 +240,18 @@ class TrashWatcher:
     like LatestFrameReader.get. The caller asks for the latest result and never waits for the model.
 
         tracks, stamp, seq, rate = watcher.latest()   # stamp = arrival time of the analysed frame
+
+    select(track_id) marks the piece go-to is heading for. While YOLO doesn't see that one, a CSRT
+    tracker fills in its box for up to csrt_max_s (vision/csrt.py); 0 = off.
     """
 
-    def __init__(self, get_frame, tracker, log=print):
+    def __init__(self, get_frame, tracker, log=print, csrt_max_s: float = 0.0, csrt=None):
         self.get_frame = get_frame
         self.tracker = tracker
         self.log = log
+        self._csrt = csrt or (SelectedBoxTracker(csrt_max_s) if csrt_max_s > 0 else None)
+        self._selected: int | None = None
+        self._sel_label, self._sel_conf = "", 0.0   # the selected piece, as YOLO last saw it
         self._lock = threading.Lock()
         self._tracks: list[Track] = []
         self._stamp = 0.0
@@ -263,7 +271,7 @@ class TrashWatcher:
                     time.sleep(0.005)
                     continue
                 last_seq = seq
-                tracks = self.tracker.update(frame)
+                tracks = self._fill_in_selected(frame, self.tracker.update(frame))
                 now = time.monotonic()
                 with self._lock:
                     dt = max(now - t_prev, 1e-3)
@@ -273,6 +281,30 @@ class TrashWatcher:
         except Exception as e:   # never take the caller down; report instead
             self.error = f"trash watcher stopped: {e!r}"
             self.log(self.error)
+
+    def select(self, track_id: int | None):
+        """The piece go-to is heading for (None = none): only this one gets the CSRT fallback."""
+        self._selected = track_id
+
+    def _fill_in_selected(self, frame: np.ndarray, tracks: list[Track]) -> list[Track]:
+        sel = self._selected
+        if self._csrt is None:
+            return tracks
+        if sel is None:
+            self._csrt.reset()
+            return tracks
+        mine = next((t for t in tracks if t.track_id == sel), None)
+        if mine is not None:                       # YOLO sees it: CSRT restarts on YOLO's box
+            self._csrt.seen(frame, mine.box)
+            self._sel_label, self._sel_conf = mine.label, mine.conf
+            return tracks
+        box = self._csrt.follow(frame)
+        if box is None:
+            return tracks
+        if any(iou(box, t.box) >= OVERLAP_IOU for t in tracks):
+            self._csrt.reset()                     # YOLO has it under a new ID: the follower adopts that one
+            return tracks
+        return tracks + [Track(sel, self._sel_label, self._sel_conf, box, "csrt")]
 
     def latest(self) -> tuple[list[Track], float, int, float]:
         """(tracks, arrival time of the frame they belong to, result number, results per second)."""

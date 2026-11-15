@@ -133,7 +133,7 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
     if tracker is not None:
         from ..vision.trash import TrashWatcher, to_sighting
 
-        watcher = TrashWatcher(frames.get_stamped, tracker)
+        watcher = TrashWatcher(frames.get_stamped, tracker, csrt_max_s=cfg.trash.csrt_max_s)
     tele = Teleop(dog, log=print)
     hold_keys, click_keys = key_maps()
 
@@ -286,6 +286,7 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
                     trash_pose = history.at(stamp - latency) or pose
                     follower.update(sightings, trash_pose, now)
                 follower.tick(now)
+                watcher.select(follower.track_id)   # only the selected piece gets the CSRT fallback
                 if watcher.error:
                     message = watcher.error
             # Slow while going to a tracked piece, so the tracker keeps up; normal speed otherwise.
@@ -363,7 +364,7 @@ def draw(screen, fonts, frame, scale, view_h, model, grid, goto, step, pose, see
         tracks, sightings, follower, _, _ = trash
         for t, sg in zip(tracks, sightings):
             mine = t.track_id == follower.track_id
-            col = GREEN if mine else CYAN
+            col = AMBER if t.source == "csrt" else GREEN if mine else CYAN   # amber: YOLO lost it, CSRT's box
             x0, y0 = sp(t.box[:2])
             x1, y1 = sp(t.box[2:])
             pg.draw.rect(screen, col, (x0, y0, max(1, x1 - x0), max(1, y1 - y0)), 3 if mine else 1)
@@ -373,7 +374,8 @@ def draw(screen, fonts, frame, scale, view_h, model, grid, goto, step, pose, see
                 dist = "cut off"
             else:
                 dist = f"{math.hypot(sg.floor[0] - model.forward_offset_m, sg.floor[1]):.2f} m"
-            lab = small.render(f"#{t.track_id} {t.label} {t.conf:.2f}  {dist}", True, (0, 0, 0), col)
+            via = "  CSRT" if t.source == "csrt" else ""
+            lab = small.render(f"#{t.track_id} {t.label} {t.conf:.2f}  {dist}{via}", True, (0, 0, 0), col)
             screen.blit(lab, (x0, y0 - lab.get_height() if y0 > lab.get_height() else y1))
 
     # The goal, re-projected every frame from where the robot was when the picture was taken (the

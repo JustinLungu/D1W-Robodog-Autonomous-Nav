@@ -63,6 +63,8 @@ trash:
   follow_vx: 0.10        # m/s while driving to a tracked piece: slow, so the tracker keeps up
   lost_after_s: 1.0      # not seen for this long -> finish blind, on odometry
   reacquire_m: 0.4       # the tracker renamed the piece: a track this close to the goal is taken as the same
+  csrt_max_s: 2.0        # YOLO lost the SELECTED piece: OpenCV's CSRT tracker follows its pixels for up to
+                         # this long (its box says "CSRT"). It drifts over time, hence the limit. 0 = off
 
 # Camera-based obstacle WARNING (robodog-obstacles, robodog-teleop --obstacles).
 # It only warns; it never stops the robot. All values are fractions of the camera image:

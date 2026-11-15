@@ -97,6 +97,7 @@ class TrashConfig:
     follow_vx: float         # m/s while driving to a tracked target (slow, so the tracker keeps up)
     lost_after_s: float      # not seen for this long -> drive on blind (odometry only)
     reacquire_m: float       # a new track this close to the goal is taken as the same object
+    csrt_max_s: float        # YOLO lost the selected piece: CSRT follows it for up to this long (0 = off)
 
 
 @dataclass

@@ -8,7 +8,9 @@ requires-python = "==3.10.*"
 dependencies = [
     "numpy>=1.26,<3",
     # OpenCV 5 is very new; stay on the proven 4.x line for the RTSP camera stream.
-    "opencv-python>=4.10,<5",
+    # The contrib build: the same cv2 plus extra modules, among them the CSRT tracker
+    # that keeps hold of the selected trash piece when YOLO loses it (vision/csrt.py).
+    "opencv-contrib-python>=4.10,<5",
     "pyyaml>=6",
     # Keyboard teleop window: real key press/release events (a terminal only sees presses).
     "pygame>=2.5",
@@ -39,6 +41,9 @@ robot-bus = ["eclipse-zenoh==1.6.2"]
 dev = ["pytest>=8"]
 
 [tool.uv]
+# Ultralytics depends on opencv-python. Both wheels install the same `cv2` module, so having
+# both breaks it: keep opencv-contrib-python as the only OpenCV.
+exclude-dependencies = ["opencv-python"]
 # The two vision extras use different PyTorch builds, so they can't be installed together.
 conflicts = [[{ extra = "vision-cpu" }, { extra = "vision-gpu" }]]
 
