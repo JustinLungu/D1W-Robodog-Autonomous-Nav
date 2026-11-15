@@ -28,6 +28,8 @@ class FakeHighLevel:
         self.simulate = simulate
         self.sim_dt = sim_dt
         self.x = self.y = self.yaw = 0.0
+        self.z = 0.0                 # body height (getPosition z); 0 = "unknown", SafeDog then skips its check
+        self.app_works = True        # False: app commands have no effect (to test the "didn't go down" path)
         self._vel = (0.0, 0.0, 0.0)
         self._last_move = None
 
@@ -135,4 +137,10 @@ class FakeHighLevel:
         return [0.0, 0.0, self.yaw]
 
     def getPosition(self):
-        return [self.x, self.y, 0.0]
+        return [self.x, self.y, self.z]
+
+    # --- the vendor app's UDP commands (robodog.app_link), recorded instead of sent ---
+    def app_command(self, code: int):
+        self._record("app", int(code))
+        if self.app_works and self.z > 0:
+            self.z = {106: 0.25, 122: 0.385}.get(int(code), self.z)

@@ -32,17 +32,15 @@ ESTOP_STOP_S = 0.3
 # that: lieDown(), wait 3 s, passive(). Their remote also has "damping (slowly lie down)".
 LIE_DOWN_S = 3.0
 
-# Crawl = the SDK's own low crawl gait, crawl(vx, vy, yaw). The library has a state machine
-# (its messages are in libmc_sdk_zsl_1w): crawl() is only accepted right after standUp()
-# ("must transition to 'standUp' first"; after move() the robot counts as "running", mode 18),
-# and while crawling move() is refused ("in crawl state") until cancelCrawl(). Our loop sends
-# move() all the time as the keepalive, which is why a plain switch to crawl() did nothing.
-# So set_crawl(True):  standUp(), send nothing for crawl.settle_s, then crawl(0, 0, 0) for
-#                      crawl.change_s (the body goes down), then drive with crawl(), never move().
-# set_crawl(False):    cancelCrawl(), standUp(), send nothing for STAND_SETTLE_S, then move().
-# Motion is refused during both changes (settled() is False). crawl()'s minimum forward speed
-# is 0.1 m/s (move(): 0.05), see the vendor docs section 1.7.
-MIN_CRAWL_VX = 0.1
+# Crawl = the robot's real low crawl (RL_crawl: body ~0.385 m -> ~0.25 m), switched with the
+# vendor APP's UDP command (app_link.py), because the SDK has no command for it: SDK crawl()
+# starts a tall stepping gait instead (RL_GaitWalk), and attitudeControl() is undone by move().
+# Found in the robot's logs while using the remote, confirmed from the laptop 2026-11-15.
+#   set_crawl(True):  standing still -> app crawl (106), send nothing for crawl.change_s while
+#                     the body goes down, then drive with the normal move() (as the remote does)
+#                     under the crawl caps. The body height (getPosition z) is checked afterwards.
+#   set_crawl(False): standing still -> app stand (122), send nothing for crawl.raise_s, move().
+# Both silent phases stay under the robot's ~3 s no-command watchdog.
 
 
 class SafetyError(RuntimeError):
@@ -74,6 +72,7 @@ class SafeDog:
         allow_motion: bool = False,
         clock: Callable[[], float] = time.monotonic,
         log: Callable[[str], None] = print,
+        app: Callable[[int], None] | None = None,
     ):
         # `robot` is anything with the vendor's method names: the real HighLevel object,
         # or FakeHighLevel in tests and dry runs. SafeDog doesn't know or care which.
@@ -90,6 +89,15 @@ class SafeDog:
         # instantly instead of actually waiting.
         self.clock = clock
         self.log = log
+
+        # Sends the vendor app's UDP commands (crawl / stand, see app_link.py). The fake robot
+        # records them instead (robot.app_command), so tests and --fake never send anything.
+        if app is None:
+            app = getattr(robot, "app_command", None)
+        if app is None:
+            from .app_link import AppLink
+            app = AppLink(cfg.network.robot_ip, cfg.network.laptop_ip).command
+        self.app = app
 
         # The lock makes sure only one thread at a time reads/changes the state below.
         # Without it, e.g. an e-stop could happen halfway through tick(), and tick()
@@ -108,13 +116,12 @@ class SafeDog:
         self._restand_at: float | None = None  # after a handshake: when to call standUp() again
         self._passive_timer: threading.Timer | None = None  # pending "fully down" step after lieDown()
         self._last_posture = ("start", self.clock())  # last stand/lie/handshake command + when (for warnings)
-        self._crawling = False               # in the crawl gait: the loop sends crawl() instead of move()
+        self._crawling = False               # body low in the robot's crawl (after a finished set_crawl(True))
         self._crawl_target = False           # where the current posture change is heading
         self._body_until: float | None = None  # while not None: posture change in progress (motion refused)
-        self._body_phase: str | None = None  # "prep" (after standUp), "lower" (sending crawl(0,0,0)), "raise"
-        self._crawl_ok = False               # crawl() accepted at least once during "lower"
-        self._crawl_rc = None                # first error code crawl() returned during "lower"
-        self.crawl_error: str | None = None  # why the last crawl attempt was given up (for the UI)
+        self._body_phase: str | None = None  # "lower" or "raise"
+        self._z_before: float | None = None  # body height when the change started (to check it worked)
+        self.crawl_error: str | None = None  # why the last crawl attempt failed (for the UI)
         self._fault: str | None = None       # reason for a latched fault, or None if all is fine
         self._estopped = False               # True after estop(): robot is limp, never touch it again
         self._last_battery_check = -float("inf")  # forces a battery check on the first tick
@@ -233,7 +240,6 @@ class SafeDog:
                 # After an e-stop the robot is already going down; don't send it anything else.
                 raise SafetyError("e-stopped: robot is already lying down")
             was_standing = self._active and self.clock() >= self._settled_at
-            in_crawl = self._in_crawl_gait()
             self._cmd = (0.0, 0.0, 0.0)
             self._active = False         # loop stops sending move() from the next tick
             self._restand_at = None      # cancel a pending re-stand after a handshake
@@ -241,9 +247,7 @@ class SafeDog:
             self._body_until = self._body_phase = None
             # The vendor says lieDown() must not be called while moving, so stop first. Only if
             # it was actually standing: a crouched robot rejects move() ("transition to Move failed").
-            if in_crawl:
-                self._stop_crawl_gait()
-            elif was_standing:
+            if was_standing:
                 self._check_rc("move", self.robot.move(0.0, 0.0, 0.0))
             self._check_rc("lieDown", self.robot.lieDown())
             self._schedule_fully_down()
@@ -299,19 +303,19 @@ class SafeDog:
                 raise SafetyError(f"still standing up: wait {STAND_SETTLE_S:.0f} s after stand() (see settled())")
             cap_vx, cap_vy, cap_yaw = self.speed_caps()   # crawl caps while crawling
             self._cmd = (
-                _shape(vx, cap_vx, MIN_CRAWL_VX if self._crawling else MIN_VX),
+                _shape(vx, cap_vx, MIN_VX),
                 _shape(vy, cap_vy, MIN_VY),
                 _shape(yaw, cap_yaw, MIN_YAW),
             )
             self._cmd_time = self.clock()  # timestamp for the dead-man switch in tick()
 
     def set_crawl(self, on: bool):
-        """Switch to the crawl gait (on) or back to normal standing (off). Only while standing STILL.
+        """Crawl low (on) or stand tall again (off). Only while standing STILL and settled.
 
-        on:  standUp(), nothing for crawl.settle_s, crawl(0, 0, 0) for crawl.change_s, then the
-             loop drives with crawl() under the crawl caps. If the robot refuses every crawl(),
-             it goes back to standing and crawl_error says why.
-        off: cancelCrawl(), standUp(), nothing for STAND_SETTLE_S, then move() as usual.
+        on:  the app's crawl command over UDP, then nothing for crawl.change_s while the body goes
+             down; then the loop drives with move() as usual, under the crawl caps. If the body
+             height didn't drop (getPosition z), crawl_error says so and it counts as standing.
+        off: the app's stand command, then nothing for crawl.raise_s; then move() as usual.
         Motion is refused during the change (settled() is False).
         """
         with self._lock:
@@ -322,46 +326,58 @@ class SafeDog:
                 raise SafetyError("crawl only while standing still (wait for the current move to finish)")
             moving = any(self._cmd) or (self.last_sent is not None and any(self.last_sent))
             if moving:
-                raise SafetyError("stop first: the crawl gait can only be switched while standing still")
+                raise SafetyError("stop first: the posture can only be switched while standing still")
+            from .app_link import CMD_CRAWL, CMD_STAND
             c = self.cfg.crawl
+            z_before = self._body_z()               # before sending: the body starts moving right away
+            try:
+                self.app(CMD_CRAWL if on else CMD_STAND)
+            except OSError as e:
+                raise SafetyError(f"could not send the crawl command to the robot: {e}") from e
             now = self.clock()
             self._cmd = (0.0, 0.0, 0.0)
-            z = self._body_z()
-            if on:
-                self.crawl_error = None
-                self._check_rc("standUp", self.robot.standUp())   # crawl() needs the standUp state
-                self._crawl_target = True
-                self._body_phase = "prep"
-                self._body_until = now + c.settle_s
-                self.log(f"crawl: standUp(), then crawl(0, 0, 0) for {c.change_s:.1f} s "
-                         f"(body height now {z})")
-            else:
-                self._stop_crawl_gait()
-                self._check_rc("standUp", self.robot.standUp())
-                self._crawling = self._crawl_target = False
-                self._body_phase = "raise"
-                self._body_until = now + STAND_SETTLE_S
-                self.log(f"crawl off: cancelCrawl(), standUp() (body height while crawling {z})")
+            self._z_before = z_before
+            self.crawl_error = None
+            self._crawl_target = on
+            self._crawling = False if not on else self._crawling
+            self._body_phase = "lower" if on else "raise"
+            self._body_until = now + (c.change_s if on else c.raise_s)
             self._settled_at = self._body_until      # no motion until the change is done
+            self._last_posture = ("app crawl" if on else "app stand", now)
+            self.log(f"{'crawl: app command 106' if on else 'stand tall: app command 122'} sent "
+                     f"(body height {self._fmt_z(self._z_before)}); waiting {self._body_until - now:.1f} s")
 
-    def _body_z(self) -> str:
-        """The robot's body height estimate (getPosition z), for the log: helps to measure crawl height."""
+    def _body_z(self) -> float | None:
+        """The robot's body height estimate (getPosition z, m), or None if it can't be read."""
         try:
-            return f"z={float(self.robot.getPosition()[2]):.3f} m"
+            return float(self.robot.getPosition()[2])
         except Exception:
-            return "z=?"
+            return None
 
-    def _in_crawl_gait(self) -> bool:
-        """True when the SDK is (or may be) in its crawl state: move() would be refused."""
-        return self._crawling or self._body_phase == "lower"
+    @staticmethod
+    def _fmt_z(z) -> str:
+        return "?" if z is None else f"{z:.3f} m"
 
-    def _stop_crawl_gait(self):
-        """Leave the crawl state: zero speed with crawl(), then cancelCrawl(). Never raises."""
-        for name, call in (("crawl", lambda: self.robot.crawl(0.0, 0.0, 0.0)), ("cancelCrawl", self.robot.cancelCrawl)):
-            try:
-                call()
-            except Exception as e:
-                self.log(f"{name}() raised: {e!r}")
+    def _finish_posture_change(self, now: float):
+        """End of a crawl / stand-tall change (tick(), under the lock)."""
+        z = self._body_z()
+        if self._body_phase == "lower":
+            drop = None if (z is None or self._z_before is None) else self._z_before - z
+            # Only judge when the height reading looks real (the fake robot always says 0).
+            if drop is not None and self._z_before > 0.2 and drop < self.cfg.crawl.min_drop_m:
+                self.crawl_error = (f"the body didn't go down ({self._fmt_z(self._z_before)} -> {self._fmt_z(z)}): "
+                                    "still standing tall")
+                self.log(f"warning: {self.crawl_error}")
+                self._crawling = self._crawl_target = False
+            else:
+                self._crawling = True
+                self.log(f"crawling: body height {self._fmt_z(self._z_before)} -> {self._fmt_z(z)}")
+        else:
+            self._crawling = False
+            self.log(f"standing tall: body height {self._fmt_z(self._z_before)} -> {self._fmt_z(z)}")
+        self._body_until = self._body_phase = None
+        self._cmd = (0.0, 0.0, 0.0)          # start the new posture standing still
+        self._settled_at = now
 
     def shake_hand(self):
         """Shake hands, exactly like the vendor demo: shakeHand(), send nothing for SHAKE_HAND_S,
@@ -393,7 +409,6 @@ class SafeDog:
         # send another move() after this point.
         with self._lock:
             was_standing = self._active and self.clock() >= self._settled_at
-            in_crawl = self._in_crawl_gait()
             self._estopped = True
             self._fault = f"E-STOP ({reason})"
             self._active = False
@@ -406,10 +421,7 @@ class SafeDog:
         # call can't block other threads that need the lock.
         self.log(f"!!! {self._fault}: stopping and lying down")
         try:
-            if in_crawl:      # move() is refused in the crawl state
-                self._stop_crawl_gait()
-                time.sleep(ESTOP_STOP_S)
-            elif was_standing:  # a crouched robot rejects move()
+            if was_standing:  # a crouched robot rejects move()
                 self.robot.move(0.0, 0.0, 0.0)
                 time.sleep(ESTOP_STOP_S)  # let it stop before switching to lying down
             rc = self.robot.lieDown()
@@ -433,9 +445,8 @@ class SafeDog:
           2. connection lost?     -> halt
           3. battery too low?     -> halt   (checked once per battery_check_period, not every tick)
           4. not standing?        -> send nothing
-          5. changing posture?    -> crawl(0, 0, 0) while entering the crawl gait, else nothing
-          6. otherwise            -> send move() (crawl() while crawling) with the latest speed,
-                                     or 0 if it's stale (dead-man)
+          5. changing posture?    -> send nothing (crawl / stand-tall app command in progress)
+          6. otherwise            -> send move() with the latest speed, or 0 if it's stale (dead-man)
         """
         with self._lock:
             if self._fault:
@@ -464,38 +475,9 @@ class SafeDog:
                     self._settled_at = now + STAND_SETTLE_S
                     return
                 if self._body_until is not None:
-                    if self._body_phase == "lower":
-                        # Entering the crawl gait (the body goes down); also the keepalive meanwhile.
-                        rc = self.robot.crawl(0.0, 0.0, 0.0)
-                        self.last_sent = (0.0, 0.0, 0.0)
-                        if rc in (0, None):
-                            self._crawl_ok = True
-                        elif self._crawl_rc is None:
-                            self._crawl_rc = rc
-                            self._check_rc("crawl", rc)    # log the first refusal only, not 30 a second
                     if now < self._body_until:
-                        return  # "prep" / "raise": like a stand-up, send nothing meanwhile
-                    if self._body_phase == "prep":
-                        self._body_phase = "lower"
-                        self._crawl_ok, self._crawl_rc = False, None
-                        self._body_until = self._settled_at = now + self.cfg.crawl.change_s
-                        return
-                    if self._body_phase == "lower" and not self._crawl_ok:
-                        # The robot refused every crawl(): back to normal standing.
-                        self.crawl_error = f"the robot refused crawl() (error code {self._crawl_rc}): standing tall again"
-                        self.log(f"warning: {self.crawl_error}")
-                        self._stop_crawl_gait()
-                        self._check_rc("standUp", self.robot.standUp())
-                        self._crawling = self._crawl_target = False
-                        self._body_phase = "raise"
-                        self._body_until = self._settled_at = now + STAND_SETTLE_S
-                        return
-                    if self._body_phase == "lower":
-                        self.log(f"crawling ({self._body_z()}, robot mode {self.robot.getCurrentCtrlmode()})")
-                    self._crawling = self._crawl_target
-                    self._body_until = self._body_phase = None
-                    self._cmd = (0.0, 0.0, 0.0)          # start the new posture standing still
-                    self._settled_at = now
+                        return  # posture change (app command): like a stand-up, send nothing meanwhile
+                    self._finish_posture_change(now)
                 if now < self._settled_at:
                     return  # still standing up: don't interrupt the transition
 
@@ -505,10 +487,7 @@ class SafeDog:
                 cmd = (0.0, 0.0, 0.0) if stale else self._cmd
                 # Sending every tick, even when it's (0,0,0), is also the keepalive:
                 # the robot lies down by itself after 3 s without commands.
-                if self._crawling:
-                    self._check_rc("crawl", self.robot.crawl(*cmd))   # move() is refused while crawling
-                else:
-                    self._check_rc("move", self.robot.move(*cmd))
+                self._check_rc("move", self.robot.move(*cmd))   # also while crawling, like the remote
                 self.last_sent = cmd
             except Exception as e:
                 # Any surprise from the SDK (network error, crash in the library...)
@@ -523,7 +502,6 @@ class SafeDog:
         """
         self._fault = reason
         was_active = self._active
-        in_crawl = self._in_crawl_gait()
         self._active = False
         self._restand_at = None
         self._body_until = self._body_phase = None
@@ -534,8 +512,6 @@ class SafeDog:
         if was_active:
             # Try both steps even if the first one fails (e.g. connection is gone).
             # If they can't reach the robot, its own 3 s watchdog lays it down anyway.
-            if in_crawl:
-                self._stop_crawl_gait()   # move() is refused in the crawl state
             for name, call in (("move", lambda: self.robot.move(0.0, 0.0, 0.0)), ("lieDown", self.robot.lieDown)):
                 try:
                     call()

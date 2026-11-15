@@ -362,102 +362,98 @@ def test_error_warning_says_mode_and_time_since_last_posture_command():
     assert "robot mode 1" in warning and "3.05 s after standUp" in warning
 
 
-# ---------------------------------------------------------------- crawl (the SDK's crawl gait)
+# ---------------------------------------------------------------- crawl (the app's UDP crawl command)
 from robodog import safety as _safety
+from robodog.app_link import CMD_CRAWL, CMD_STAND
 
 
-def settled_dog():
+def settled_dog(z=0.0):
     dog, robot, clock = make()
+    robot.z = z
     dog.stand()
     clock.advance(_safety.STAND_SETTLE_S + 0.1)
     dog.tick()
     return dog, robot, clock
 
 
-def crawls(robot):
-    return [c[1:] for c in robot.calls_named("crawl")]
+def apps(robot):
+    return [c[1] for c in robot.calls_named("app")]
 
 
 def enter_crawl(dog, robot, clock):
-    """X: standUp, pause, crawl(0,0,0) while the body goes down, then crawling."""
-    c = dog.cfg.crawl
     dog.set_crawl(True)
-    clock.advance(c.settle_s + 0.01)
-    dog.tick()                                    # prep over -> lower
+    clock.advance(dog.cfg.crawl.change_s + 0.01)
     dog.tick()
-    clock.advance(c.change_s + 0.01)
-    dog.tick()                                    # lower over -> crawling
 
 
-def test_crawl_restands_then_switches_to_the_crawl_gait():
-    dog, robot, clock = settled_dog()
-    c = dog.cfg.crawl
-    n_stand = len(robot.calls_named("standUp"))
+def test_crawl_sends_the_app_command_waits_then_drives_with_move():
+    dog, robot, clock = settled_dog(z=0.385)
     dog.set_crawl(True)
-    assert len(robot.calls_named("standUp")) == n_stand + 1      # crawl() needs the standUp state
+    assert apps(robot) == [CMD_CRAWL]
     assert dog.crawling and dog.body_moving and not dog.settled()
     with pytest.raises(SafetyError):
-        dog.set_velocity(0.15)                    # no driving during the change
-    n_moves = len(moves(robot))
+        dog.set_velocity(0.1)                    # no driving while the body goes down
+    n = len(robot.calls)
+    clock.advance(dog.cfg.crawl.change_s - 0.1)
     dog.tick()
-    assert crawls(robot) == [] and len(moves(robot)) == n_moves  # pause after standUp: nothing sent
-    clock.advance(c.settle_s + 0.01)
-    dog.tick()
-    dog.tick()
-    assert crawls(robot)[-1] == (0.0, 0.0, 0.0)  # body going down
-    assert len(moves(robot)) == n_moves
-    clock.advance(c.change_s + 0.01)
+    assert len(robot.calls) == n                 # silent during the change (no move() keepalive)
+    clock.advance(0.2)
     dog.tick()
     assert not dog.body_moving and dog.crawling and dog.settled() and dog.crawl_error is None
-    dog.set_velocity(0.15)
+    dog.set_velocity(0.1)
     dog.tick()
-    assert crawls(robot)[-1] == (0.15, 0.0, 0.0)  # drives with crawl(), never move()
-    assert len(moves(robot)) == n_moves
-    assert all(rc == 0 for rc in [robot.crawl(0.0, 0.0, 0.0)])   # the fake accepted the sequence
+    assert moves(robot)[-1] == (0.1, 0.0, 0.0)  # normal move(), like the remote after crawl
+    assert robot.calls_named("crawl") == []      # never the SDK's crawl() (that's a tall stepping gait)
 
 
-def test_crawl_has_slower_caps_and_crawl_minimum():
+def test_crawl_silence_stays_under_the_robot_watchdog():
+    dog, _, _ = settled_dog()
+    assert dog.cfg.crawl.change_s < 3.0 and dog.cfg.crawl.raise_s < 3.0
+
+
+def test_crawl_has_slower_caps():
     dog, robot, clock = settled_dog()
     enter_crawl(dog, robot, clock)
     dog.set_velocity(5.0, 5.0, 5.0)
     dog.tick()
     c = dog.cfg.crawl
-    assert crawls(robot)[-1] == (min(c.max_vx, 0.3), min(c.max_vy, 0.2), min(c.max_yaw, 0.5))
+    assert moves(robot)[-1] == (min(c.max_vx, 0.3), min(c.max_vy, 0.2), min(c.max_yaw, 0.5))
     assert dog.speed_caps() == (min(c.max_vx, 0.3), min(c.max_vy, 0.2), min(c.max_yaw, 0.5))
-    dog.set_velocity(0.07)                        # fine for move(), below crawl()'s 0.1 minimum
-    dog.tick()
-    assert crawls(robot)[-1] == (0.0, 0.0, 0.0)
 
 
-def test_crawl_off_cancels_and_restands():
-    dog, robot, clock = settled_dog()
+def test_crawl_off_sends_the_app_stand_command():
+    dog, robot, clock = settled_dog(z=0.385)
     enter_crawl(dog, robot, clock)
     dog.set_crawl(False)
-    names = [c[0] for c in robot.calls[-3:]]
-    assert names == ["crawl", "cancelCrawl", "standUp"]
+    assert apps(robot) == [CMD_CRAWL, CMD_STAND]
     assert not dog.crawling and dog.body_moving and not dog.settled()
-    n_moves = len(moves(robot))
+    n = len(moves(robot))
     dog.tick()
-    assert len(moves(robot)) == n_moves            # stand-up pause: nothing sent
-    clock.advance(_safety.STAND_SETTLE_S + 0.01)
+    assert len(moves(robot)) == n
+    clock.advance(dog.cfg.crawl.raise_s + 0.01)
     dog.tick()
-    assert dog.settled() and dog.speed_caps() == (0.3, 0.2, 0.5)
+    assert dog.settled() and not dog.crawling and dog.speed_caps() == (0.3, 0.2, 0.5)
     dog.set_velocity(0.2)
     dog.tick()
-    assert moves(robot)[-1] == (0.2, 0.0, 0.0)     # accepted again after cancelCrawl + standUp
+    assert moves(robot)[-1] == (0.2, 0.0, 0.0)
 
 
-def test_crawl_refused_by_robot_goes_back_to_standing():
-    dog, robot, clock = settled_dog()
-    robot.crawl = lambda *a: (robot._record("crawl", *map(float, a)), 12295)[1]
-    logs = []
-    dog.log = logs.append
+def test_crawl_that_did_not_lower_the_body_counts_as_standing():
+    dog, robot, clock = settled_dog(z=0.385)
+    robot.app_works = False
     enter_crawl(dog, robot, clock)
-    assert not dog.crawling and dog.body_moving and "12295" in dog.crawl_error
-    assert sum("returned error code 12295" in m for m in logs) == 1    # logged once, not every tick
-    clock.advance(_safety.STAND_SETTLE_S + 0.01)
-    dog.tick()
-    assert dog.settled() and not dog.crawling
+    assert not dog.crawling and dog.settled() and "didn't go down" in dog.crawl_error
+    assert dog.speed_caps() == (0.3, 0.2, 0.5)
+
+
+def test_crawl_send_error_is_a_refusal():
+    dog, robot, clock = settled_dog()
+    def broken(code):
+        raise OSError("network unreachable")
+    dog.app = broken
+    with pytest.raises(SafetyError, match="could not send"):
+        dog.set_crawl(True)
+    assert not dog.crawling and dog.settled()
 
 
 def test_crawl_needs_standing_still_and_settled():
@@ -475,30 +471,39 @@ def test_crawl_needs_standing_still_and_settled():
     dog.tick()
     dog.set_velocity(0.0)
     dog.tick()
+    assert apps(robot) == []                          # nothing was sent while moving
     dog.set_crawl(True)                               # stopped: fine
+    assert apps(robot) == [CMD_CRAWL]
+
+
+def test_crawl_off_also_needs_standing_still():
+    dog, robot, clock = settled_dog()
+    enter_crawl(dog, robot, clock)
+    dog.set_velocity(0.1)
+    dog.tick()
+    with pytest.raises(SafetyError, match="stop first"):
+        dog.set_crawl(False)
+    assert apps(robot) == [CMD_CRAWL]
 
 
 def test_crawl_needs_motion_allowed():
-    dog, _, _ = make(allow_motion=False)
+    dog, robot, _ = make(allow_motion=False)
     with pytest.raises(MotionBlocked):
         dog.set_crawl(True)
+    assert apps(robot) == []
 
 
-def test_lie_down_while_crawling_leaves_the_crawl_gait_first():
+def test_lie_down_or_estop_forgets_crawl_and_next_stand_is_tall():
     dog, robot, clock = settled_dog()
     enter_crawl(dog, robot, clock)
     dog.lie_down()
-    assert [c[0] for c in robot.calls[-3:]] == ["crawl", "cancelCrawl", "lieDown"]
     assert not dog.crawling
     dog.stand()
     assert not dog.crawling
-
-
-def test_estop_while_crawling_leaves_the_crawl_gait_first():
-    dog, robot, clock = settled_dog()
+    clock.advance(_safety.STAND_SETTLE_S + 0.1)
+    dog.tick()
     enter_crawl(dog, robot, clock)
     dog.estop()
-    assert [c[0] for c in robot.calls[-3:]] == ["crawl", "cancelCrawl", "lieDown"]
     n = len(robot.calls)
     dog.tick()
     assert not dog.crawling and len(robot.calls) == n   # nothing more sent after the e-stop

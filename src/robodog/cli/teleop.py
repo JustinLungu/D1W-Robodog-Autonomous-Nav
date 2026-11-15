@@ -18,7 +18,7 @@ are ignored, and clicking away stops the robot.
   S / Down    backward                F      lie down
   A / Left    turn left               1 2 3  speed level (slow / medium / max cap)
   D / Right   turn right              H      shake hands (~7 s, then standing again)
-                                      X      crawl on/off: the SDK crawl gait (~4 s to switch, standing still)
+                                      X      crawl on/off: the robot's low crawl, as the remote's button (~2.5 s, standing still)
                                       SPACE  E-STOP (stop + lie down, latched)
   Q / E       sideways left / right   Esc    lie down and quit (also: close the window)
 

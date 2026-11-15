@@ -169,45 +169,46 @@ def test_handshake_key_ignores_motion_until_standing_again(monkeypatch):
 
 def crawl_ready(change_s=0.05):
     tele, dog, robot = make()
-    dog.cfg.crawl.settle_s = dog.cfg.crawl.change_s = change_s   # real clock here: keep it short
+    dog.cfg.crawl.change_s = dog.cfg.crawl.raise_s = change_s   # real clock here: keep it short
     tele.action("stand")
     drive(tele, dog, set(), 0.1)
     return tele, dog, robot
 
 
-def test_x_switches_to_the_crawl_gait_then_drives_slower():
+def test_x_crawls_then_drives_slower():
     import time
     tele, dog, robot = crawl_ready()
     tele.action("crawl")
+    assert robot.calls_named("app") == [("app", 106)]
     assert dog.crawling and tele.state().crawling and tele.state().body_moving
-    for _ in range(3):
-        time.sleep(0.06)
-        drive(tele, dog, set(), 0.1)
+    time.sleep(0.06)
+    drive(tele, dog, set(), 0.1)
     assert not tele.state().body_moving and "CRAWLING" in tele.message
     tele.action("speed_3")
     drive(tele, dog, {"forward"}, 2.0)
     assert tele.state().cmd[0] == pytest.approx(min(dog.cfg.crawl.max_vx, dog.cfg.safety.max_vx))
-    assert robot.calls_named("crawl")[-1][1] > 0                 # driving with crawl()
+    assert robot.calls_named("move")[-1][1] > 0
 
 
-def test_x_again_stands_tall(monkeypatch):
+def test_x_again_stands_tall():
     import time
     tele, dog, robot = crawl_ready()
     tele.action("crawl")
-    for _ in range(3):
-        time.sleep(0.06)
-        drive(tele, dog, set(), 0.1)
+    time.sleep(0.06)
+    drive(tele, dog, set(), 0.1)
     tele.action("crawl")
-    assert robot.calls_named("cancelCrawl")
+    assert robot.calls_named("app")[-1] == ("app", 122)
+    time.sleep(0.06)
     drive(tele, dog, set(), 0.1)
     assert not dog.crawling and "standing" in tele.message
 
 
 def test_x_needs_standing_and_stopped():
-    tele, dog, _ = make()
+    tele, dog, robot = make()
     tele.action("crawl")
     assert not dog.crawling and "stand up first" in tele.message
     tele.action("stand")
     drive(tele, dog, {"forward"}, 0.5)
     tele.action("crawl")                                         # keys still held
     assert not dog.crawling and "stop first" in tele.message
+    assert robot.calls_named("app") == []

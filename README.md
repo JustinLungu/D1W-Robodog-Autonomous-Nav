@@ -529,19 +529,47 @@ The go-to window (§6.7) then shows the tracked boxes. **Click a box** and **hol
 
 Each detection is placed using the pose the robot had when that frame was taken (`trash.camera_delay_s` ago), so the robot's own movement in between cancels out. Clicking the floor instead of a box still sets an ordinary fixed goal.
 
-**Crawling while following:** with `trash.crawl_to_target: true` (default), holding G on a tracked piece first **switches to the crawl gait** (the window shows `LOWERING...`, about 4 s, standing still), then follows it at crawl speed (`trash.follow_vx` 0.12 m/s; `crawl()` ignores less than 0.1). While crawling, all distances use `camera.crawl_height_m` (0.20, a first guess: measure it). `--posture crawl` sets that height without crawling (for `--fake` or recordings). The camera's tilt is assumed the same in both postures. If the robot refuses `crawl()`, it follows standing instead (X retries).
+**Crawling while following:** with `trash.crawl_to_target: true` (default), holding G on a tracked piece first **switches to crawl** (the window shows `LOWERING...`, about 2.5 s, standing still), then follows it at crawl speed. While crawling, all distances use `camera.crawl_height_m` (0.265 m: the lens drops by the same 0.135 m as the body). `--posture crawl` sets that height without crawling (for `--fake` or recordings). The camera's tilt is assumed the same in both postures. If the body didn't go down, it follows standing instead (X retries).
 
 #### Crawling (X in `robodog-teleop` and `robodog-goto`)
-**X** switches to the SDK's low crawl gait; **X** again stands tall. Only while standing still; keys are ignored during the change (~4 s down, ~3 s up). Lying down (F), the e-stop, or a new stand-up (R) always end up at normal height.
+**X** puts the robot into its low crawl, exactly like the crawl button on the vendor remote; **X** again stands it tall. Only while standing still (keys released, robot stopped): SafeDog refuses the switch otherwise, and refuses all motion while the posture changes (~2.5 s). Lying down (F), the e-stop, or a new stand-up (R) always end up at normal height.
 
-How: the SDK library has a state machine (its messages are inside `libmc_sdk_zsl_1w`): `crawl()` is only accepted right after `standUp()` (`must transition to 'standUp' first`; after `move()` the robot counts as running, mode 18), and while crawling `move()` is refused (`in crawl state`) until `cancelCrawl()`. Our first attempt switched from `move()` straight to `crawl()`, so it was refused; lowering with `attitudeControl()` only bent it briefly, because the next `move()` stood it back up. Now SafeDog:
-1. **X on:** `standUp()`, sends nothing for `crawl.settle_s` (2 s), then `crawl(0, 0, 0)` for `crawl.change_s` (2 s) while the body goes down. Then it drives with `crawl(vx, vy, yaw)` only, under the `crawl:` caps (0.15 m/s, 0.10 m/s sideways, 0.30 rad/s).
-2. **X off:** `crawl(0, 0, 0)`, `cancelCrawl()`, `standUp()`, nothing for 3 s, then `move()` as usual.
-3. **Refused:** if every `crawl()` during step 1 returns an error, it logs the code once, goes back to standing, and the window says so.
+| Posture | Body height (`getPosition` z) | Motion controller state |
+|---|---|---|
+| Standing | 0.385 m | `RL_Walk` |
+| Crawling | ~0.25 m (`drop_height: -0.13` in the robot's config) | `RL_crawl` |
+| Lying down | ~0.15 m | folded legs |
 
-The terminal logs the robot's own body height (`getPosition` z) and mode at each switch: use the difference to set `camera.crawl_height_m` (camera height standing minus how much the body dropped).
+**How:** the SDK has no command for this crawl, so we send the vendor app's command over UDP (below), wait, and then drive with the normal SDK `move()`, which is also what the remote does after its crawl button. In detail:
+1. **X on** (standing still): send the app's crawl command (106). SafeDog then sends nothing for `crawl.change_s` (2.5 s) while the body goes down; staying under 3 s keeps the robot's no-command watchdog from laying it down. Then it checks the body height: if it dropped less than `crawl.min_drop_m` (5 cm), the window says the crawl failed and it carries on standing.
+2. **Drive:** normal `move()` under the slower `crawl:` caps (0.15 m/s, 0.10 m/s sideways, 0.30 rad/s).
+3. **X off** (standing still): send the app's stand command (122), nothing for `crawl.raise_s` (2.5 s), then `move()` as usual.
 
-**Untested on the robot.** On the first try (standing, remote in hand, speed level 1), check: does it go down and stay down while driving, which mode does the terminal log, and does X bring it back up.
+The terminal (`[safedog] ...`) logs the body height before and after each switch.
+
+**What did not work, and why** (so nobody tries it again):
+- **SDK `crawl()`** starts a *tall* stepping gait (`RL_GaitWalk` in the controller log), not the low crawl. It also needs an extra `standUp()` first (otherwise "robot is runing, can't transition to crawl"), and while it's active `move()` is refused.
+- **SDK `attitudeControl(height_vel)`** lowers the body briefly, but the next `move()` stands it straight back up.
+
+**Not yet tested with the robot:** driving in crawl with our `move()` (the remote does exactly this, so it should stay low), and lying down (F) straight from crawl. To be safe, press X to stand tall first, then F.
+
+#### The vendor app's UDP commands (undocumented)
+The vendor's phone app / remote doesn't talk to the SDK: it sends small JSON messages over **UDP to port 8081** of the robot (192.168.234.1), where the `dog_task` program receives them and passes them on to the motion controller (`mc_ctrl`). We found them in the robot's logs while using the remote (read-only), and confirmed crawl by sending it from a laptop on 2026-11-15: the controller logged `[RL_crawl] on Enter!` and the body went from 0.385 m to 0.255 m.
+
+| Message | Meaning | What the robot logs |
+|---|---|---|
+| `{"type":"heartbeat"}` | "app connected"; the app sends it ~10x a second | |
+| `{"cmd":106,"type":"cmd"}` | crawl (low body) | `control_mode 0x12, motion_mode 0x11`, then `stand_down`, `RL_crawl` |
+| `{"cmd":122,"type":"cmd"}` | stand up (tall) | `control_mode 0x1, motion_mode 0xa`, then `stand_up`, `rl` |
+| `{"cmd":90,"type":"cmd"}` | dump / emergency lie-down | `emergency` (our code doesn't use it) |
+| `{"type":"remote","button":[...14...],"joystick":[4 floats]}` | the remote's sticks and buttons (driving) | `ap remote high_level_cmd: ... vx ...` |
+
+Our code sends a few heartbeats, then the command 3 times (the app repeats it too); see [src/robodog/app_link.py](src/robodog/app_link.py). Nothing comes back, so SafeDog checks the effect through the body height. By hand, with the robot standing still and the laptop on the robot's Wi-Fi:
+```bash
+python3 -c 'import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); [s.sendto(m, ("192.168.234.1", 8081)) for m in [b"{\"type\":\"heartbeat\"}"]*3 + [b"{\"cmd\":106,\"type\":\"cmd\"}"]*3]'   # crawl
+python3 -c 'import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); [s.sendto(m, ("192.168.234.1", 8081)) for m in [b"{\"type\":\"heartbeat\"}"]*3 + [b"{\"cmd\":122,\"type\":\"cmd\"}"]*3]'   # stand tall
+```
+Where to look on the robot (read-only): `/tmp/log/dog_task.log` (app commands, and the robot state ~10x a second including `control_mode` and the body height `current_pose.position[2]`), and `/userdata/log/robot_launch_log/motion_control.stdout` (controller state changes such as `[RL_crawl] on Enter!`).
 
 ---
 

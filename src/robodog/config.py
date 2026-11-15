@@ -76,9 +76,10 @@ class CameraConfig:
 
 @dataclass
 class CrawlConfig:
-    """Crawl = the SDK's low crawl gait (SafeDog.set_crawl)."""
-    settle_s: float          # pause after standUp() before the first crawl()
-    change_s: float          # seconds of crawl(0, 0, 0) while the body goes down
+    """Crawl = the robot's low crawl, switched with the app's UDP command (SafeDog.set_crawl)."""
+    change_s: float          # seconds of silence while the body goes down (keep < 3: robot watchdog)
+    raise_s: float           # the same while it stands tall again
+    min_drop_m: float        # the body must drop at least this much (getPosition z), else "crawl failed"
     max_vx: float            # speed caps while crawling (the safety caps still apply on top)
     max_vy: float
     max_yaw: float
