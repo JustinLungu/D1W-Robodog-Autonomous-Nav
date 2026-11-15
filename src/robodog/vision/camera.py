@@ -23,6 +23,12 @@ os.environ.setdefault(
     "OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay"
 )
 
+# Decoder threads for a stream/file. FFmpeg's default is one per CPU core (up to 16), decoding
+# several frames in parallel, and it holds back about one frame per thread: on a 16+ core laptop
+# that's ~16 frames, ~0.5 s at 30 fps, of pure delay. One thread decodes the robot's stream in
+# real time with no frames held back.
+DECODE_THREADS = 1
+
 
 class LatestFrameReader:
     """Read a camera/stream/file in the background; get() returns the newest frame.
@@ -32,8 +38,10 @@ class LatestFrameReader:
 
     def __init__(self, source: str):
         self.source = source
-        cap_source = int(source) if source.isdigit() else source
-        self._cap = cv2.VideoCapture(cap_source)
+        if source.isdigit():   # webcam: its own driver, no H.264 decoder in between
+            self._cap = cv2.VideoCapture(int(source))
+        else:
+            self._cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG, [cv2.CAP_PROP_N_THREADS, DECODE_THREADS])
         if not self._cap.isOpened():
             raise RuntimeError(f"could not open camera source {source!r}")
         self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # honoured by some backends, harmless elsewhere
