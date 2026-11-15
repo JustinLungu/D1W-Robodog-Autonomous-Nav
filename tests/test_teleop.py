@@ -169,7 +169,7 @@ def test_handshake_key_ignores_motion_until_standing_again(monkeypatch):
 
 def crawl_ready(change_s=0.05):
     tele, dog, robot = make()
-    dog.cfg.crawl.change_s = dog.cfg.crawl.raise_s = change_s   # real clock here: keep it short
+    dog.cfg.crawl.prep_s = dog.cfg.crawl.change_s = dog.cfg.crawl.raise_s = change_s   # real clock here: keep it short
     tele.action("stand")
     drive(tele, dog, set(), 0.1)
     return tele, dog, robot
@@ -179,10 +179,12 @@ def test_x_crawls_then_drives_slower():
     import time
     tele, dog, robot = crawl_ready()
     tele.action("crawl")
-    assert robot.calls_named("app") == [("app", 106)]
+    assert robot.calls_named("app") == [("app", 122)]
     assert dog.crawling and tele.state().crawling and tele.state().body_moving
-    time.sleep(0.06)
-    drive(tele, dog, set(), 0.1)
+    for _ in range(2):
+        time.sleep(0.06)
+        drive(tele, dog, set(), 0.1)
+    assert robot.calls_named("app") == [("app", 122), ("app", 106)]
     assert not tele.state().body_moving and "CRAWLING" in tele.message
     tele.action("speed_3")
     drive(tele, dog, {"forward"}, 2.0)
@@ -194,8 +196,9 @@ def test_x_again_stands_tall():
     import time
     tele, dog, robot = crawl_ready()
     tele.action("crawl")
-    time.sleep(0.06)
-    drive(tele, dog, set(), 0.1)
+    for _ in range(2):
+        time.sleep(0.06)
+        drive(tele, dog, set(), 0.1)
     tele.action("crawl")
     assert robot.calls_named("app")[-1] == ("app", 122)
     time.sleep(0.06)

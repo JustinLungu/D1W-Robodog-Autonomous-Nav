@@ -35,6 +35,7 @@ camera:
 # remote's crawl button: body ~0.385 m -> ~0.25 m. Switched with the vendor app's UDP command
 # (src/robodog/app_link.py; the SDK has no command for it), then it drives with the normal move().
 crawl:
+  prep_s: 3.0          # silence after the app stand (122) that crawl needs first (= the usual stand-up pause)
   change_s: 2.5        # seconds of silence while the body goes down (the remote's takes ~2 s; < 3 s watchdog)
   raise_s: 2.5         # the same while standing tall again
   min_drop_m: 0.05     # the body must drop at least this much, else "crawl failed" (robot drops ~0.13)

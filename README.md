@@ -541,7 +541,7 @@ Each detection is placed using the pose the robot had when that frame was taken 
 | Lying down | ~0.15 m | folded legs |
 
 **How:** the SDK has no command for this crawl, so we send the vendor app's command over UDP (below), wait, and then drive with the normal SDK `move()`, which is also what the remote does after its crawl button. In detail:
-1. **X on** (standing still): send the app's crawl command (106). SafeDog then sends nothing for `crawl.change_s` (2.5 s) while the body goes down; staying under 3 s keeps the robot's no-command watchdog from laying it down. Then it checks the body height: if it dropped less than `crawl.min_drop_m` (5 cm), the window says the crawl failed and it carries on standing.
+1. **X on** (standing still): send the app's **stand** command (122) first and nothing for `crawl.prep_s` (3 s, like any stand-up). Then one `move(0, 0, 0)` keepalive and the app's **crawl** command (106), and nothing for `crawl.change_s` (2.5 s) while the body goes down. Each silent phase stays at or under 3 s, so the robot's no-command watchdog doesn't lay it down. Then SafeDog checks the body height: if it dropped less than `crawl.min_drop_m` (5 cm), the window says the crawl failed and it carries on standing. All in all X takes ~6 s.
 2. **Drive:** normal `move()` under the slower `crawl:` caps (0.15 m/s, 0.10 m/s sideways, 0.30 rad/s).
 3. **X off** (standing still): send the app's stand command (122), nothing for `crawl.raise_s` (2.5 s), then `move()` as usual.
 
@@ -551,6 +551,12 @@ The terminal (`[safedog] ...`) logs the body height before and after each switch
 - **SDK `crawl()`** starts a *tall* stepping gait (`RL_GaitWalk` in the controller log), not the low crawl. It also needs an extra `standUp()` first (otherwise "robot is runing, can't transition to crawl"), and while it's active `move()` is refused.
 - **SDK `attitudeControl(height_vel)`** lowers the body briefly, but the next `move()` stands it straight back up.
 
+**If X doesn't go low** (the window says "the body didn't go down"), check these two things, both seen on our robot (2026-11-15):
+- **Stand before crawl.** `dog_task` only turns 106 into crawl (`control_mode 0x12, motion_mode 0x11`) after an app stand (122). When the robot was stood up through the SDK instead, it turned 106 into a lie-down (`control_mode 0x33`, which the controller ignored). That's why our code always sends 122 first.
+- **The remote's speed level.** Two remote buttons (app commands 176 / 174) set a speed level that `dog_task` *saves* in `/opt/ros/humble/share/dog_task/config/XGWHSPD_speed.yaml` (`level: high / mid / low`; it survives reboots; the default is `mid`). After ours was set to `low`, every stand-up went into `RL_GaitWalk` (the tall stepping gait) and crawl had no effect, even when sent correctly. Set the level back to mid on the remote. To check it (read-only): `ssh firefly@192.168.234.1 "grep level /opt/ros/humble/share/dog_task/config/XGWHSPD_speed.yaml"`.
+
+To see what the controller does, read-only on the robot: `awk '/on Enter|body height/' /userdata/log/robot_launch_log/motion_control.stdout | tail`. A working crawl ends in `[RL_crawl] on Enter!`.
+
 **Not yet tested with the robot:** driving in crawl with our `move()` (the remote does exactly this, so it should stay low), and lying down (F) straight from crawl. To be safe, press X to stand tall first, then F.
 
 #### The vendor app's UDP commands (undocumented)
@@ -559,15 +565,17 @@ The vendor's phone app / remote doesn't talk to the SDK: it sends small JSON mes
 | Message | Meaning | What the robot logs |
 |---|---|---|
 | `{"type":"heartbeat"}` | "app connected"; the app sends it ~10x a second | |
-| `{"cmd":106,"type":"cmd"}` | crawl (low body) | `control_mode 0x12, motion_mode 0x11`, then `stand_down`, `RL_crawl` |
+| `{"cmd":106,"type":"cmd"}` | crawl (low body); only right after an app stand (122), else it becomes a lie-down (`control_mode 0x33`) | `control_mode 0x12, motion_mode 0x11`, then `stand_down`, `RL_crawl` |
 | `{"cmd":122,"type":"cmd"}` | stand up (tall) | `control_mode 0x1, motion_mode 0xa`, then `stand_up`, `rl` |
 | `{"cmd":90,"type":"cmd"}` | dump / emergency lie-down | `emergency` (our code doesn't use it) |
+| `{"cmd":176,...}`, `{"cmd":174,...}` | speed-level buttons (exact meaning unknown); saved as `level:` in `XGWHSPD_speed.yaml` | (our code doesn't use them) |
 | `{"type":"remote","button":[...14...],"joystick":[4 floats]}` | the remote's sticks and buttons (driving) | `ap remote high_level_cmd: ... vx ...` |
 
-Our code sends a few heartbeats, then the command 3 times (the app repeats it too); see [src/robodog/app_link.py](src/robodog/app_link.py). Nothing comes back, so SafeDog checks the effect through the body height. By hand, with the robot standing still and the laptop on the robot's Wi-Fi:
+`dog_task` registers whoever sends heartbeats as an app (`add target ip: ...` in its log) and then streams the robot state back to that address on UDP port 8080. Our code sends a few heartbeats, then the command 3 times (the app repeats it too); see [src/robodog/app_link.py](src/robodog/app_link.py). Nothing comes back, so SafeDog checks the effect through the body height. By hand, with the robot standing still and the laptop on the robot's Wi-Fi:
 ```bash
-python3 -c 'import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); [s.sendto(m, ("192.168.234.1", 8081)) for m in [b"{\"type\":\"heartbeat\"}"]*3 + [b"{\"cmd\":106,\"type\":\"cmd\"}"]*3]'   # crawl
-python3 -c 'import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); [s.sendto(m, ("192.168.234.1", 8081)) for m in [b"{\"type\":\"heartbeat\"}"]*3 + [b"{\"cmd\":122,\"type\":\"cmd\"}"]*3]'   # stand tall
+# stand (also: stand tall again after crawling), then ~3 s later crawl:
+python3 -c 'import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); [s.sendto(m, ("192.168.234.1", 8081)) for m in [b"{\"type\":\"heartbeat\"}"]*3 + [b"{\"cmd\":122,\"type\":\"cmd\"}"]*3]'   # stand (122)
+python3 -c 'import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); [s.sendto(m, ("192.168.234.1", 8081)) for m in [b"{\"type\":\"heartbeat\"}"]*3 + [b"{\"cmd\":106,\"type\":\"cmd\"}"]*3]'   # crawl (106)
 ```
 Where to look on the robot (read-only): `/tmp/log/dog_task.log` (app commands, and the robot state ~10x a second including `control_mode` and the body height `current_pose.position[2]`), and `/userdata/log/robot_launch_log/motion_control.stdout` (controller state changes such as `[RL_crawl] on Enter!`).
 

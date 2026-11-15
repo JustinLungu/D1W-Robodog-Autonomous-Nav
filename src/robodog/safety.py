@@ -36,9 +36,12 @@ LIE_DOWN_S = 3.0
 # vendor APP's UDP command (app_link.py), because the SDK has no command for it: SDK crawl()
 # starts a tall stepping gait instead (RL_GaitWalk), and attitudeControl() is undone by move().
 # Found in the robot's logs while using the remote, confirmed from the laptop 2026-11-15.
-#   set_crawl(True):  standing still -> app crawl (106), send nothing for crawl.change_s while
-#                     the body goes down, then drive with the normal move() (as the remote does)
-#                     under the crawl caps. The body height (getPosition z) is checked afterwards.
+#   set_crawl(True):  standing still -> app stand (122) first, nothing for crawl.prep_s, one
+#                     move(0, 0, 0) keepalive, app crawl (106), nothing for crawl.change_s while the
+#                     body goes down; then drive with the normal move() (as the remote does) under
+#                     the crawl caps. The body height (getPosition z) is checked afterwards.
+#                     Why 122 first: dog_task only turns 106 into crawl (control 0x12, motion 0x11)
+#                     after an app stand; otherwise it turns it into a lie-down (control 0x33).
 #   set_crawl(False): standing still -> app stand (122), send nothing for crawl.raise_s, move().
 # Both silent phases stay under the robot's ~3 s no-command watchdog.
 
@@ -119,7 +122,7 @@ class SafeDog:
         self._crawling = False               # body low in the robot's crawl (after a finished set_crawl(True))
         self._crawl_target = False           # where the current posture change is heading
         self._body_until: float | None = None  # while not None: posture change in progress (motion refused)
-        self._body_phase: str | None = None  # "lower" or "raise"
+        self._body_phase: str | None = None  # "prep" (after app stand), "lower" (after app crawl), "raise"
         self._z_before: float | None = None  # body height when the change started (to check it worked)
         self.crawl_error: str | None = None  # why the last crawl attempt failed (for the UI)
         self._fault: str | None = None       # reason for a latched fault, or None if all is fine
@@ -331,7 +334,7 @@ class SafeDog:
             c = self.cfg.crawl
             z_before = self._body_z()               # before sending: the body starts moving right away
             try:
-                self.app(CMD_CRAWL if on else CMD_STAND)
+                self.app(CMD_STAND)     # both ways: crawl needs dog_task's "stood up by the app" state first
             except OSError as e:
                 raise SafetyError(f"could not send the crawl command to the robot: {e}") from e
             now = self.clock()
@@ -340,11 +343,11 @@ class SafeDog:
             self.crawl_error = None
             self._crawl_target = on
             self._crawling = False if not on else self._crawling
-            self._body_phase = "lower" if on else "raise"
-            self._body_until = now + (c.change_s if on else c.raise_s)
+            self._body_phase = "prep" if on else "raise"
+            self._body_until = now + (c.prep_s if on else c.raise_s)
             self._settled_at = self._body_until      # no motion until the change is done
             self._last_posture = ("app crawl" if on else "app stand", now)
-            self.log(f"{'crawl: app command 106' if on else 'stand tall: app command 122'} sent "
+            self.log(f"{'crawl: app stand (122) first' if on else 'stand tall: app stand (122)'} sent "
                      f"(body height {self._fmt_z(self._z_before)}); waiting {self._body_until - now:.1f} s")
 
     def _body_z(self) -> float | None:
@@ -365,8 +368,8 @@ class SafeDog:
             drop = None if (z is None or self._z_before is None) else self._z_before - z
             # Only judge when the height reading looks real (the fake robot always says 0).
             if drop is not None and self._z_before > 0.2 and drop < self.cfg.crawl.min_drop_m:
-                self.crawl_error = (f"the body didn't go down ({self._fmt_z(self._z_before)} -> {self._fmt_z(z)}): "
-                                    "still standing tall")
+                self.crawl_error = (f"the body didn't go down ({self._fmt_z(self._z_before)} -> {self._fmt_z(z)}), "
+                                    "still standing tall. Speed level on the remote set to low? (stepping gait)")
                 self.log(f"warning: {self.crawl_error}")
                 self._crawling = self._crawl_target = False
             else:
@@ -477,6 +480,19 @@ class SafeDog:
                 if self._body_until is not None:
                     if now < self._body_until:
                         return  # posture change (app command): like a stand-up, send nothing meanwhile
+                    if self._body_phase == "prep":
+                        # App stand done: one keepalive, then the app's crawl command.
+                        from .app_link import CMD_CRAWL
+                        self._check_rc("move", self.robot.move(0.0, 0.0, 0.0))
+                        self.last_sent = (0.0, 0.0, 0.0)
+                        try:
+                            self.app(CMD_CRAWL)
+                        except OSError as e:
+                            self.log(f"warning: could not send the crawl command: {e}")
+                        self.log("crawl: app crawl (106) sent")
+                        self._body_phase = "lower"
+                        self._body_until = self._settled_at = now + self.cfg.crawl.change_s
+                        return
                     self._finish_posture_change(now)
                 if now < self._settled_at:
                     return  # still standing up: don't interrupt the transition

@@ -382,6 +382,8 @@ def apps(robot):
 
 def enter_crawl(dog, robot, clock):
     dog.set_crawl(True)
+    clock.advance(dog.cfg.crawl.prep_s + 0.01)
+    dog.tick()                                   # app stand done -> app crawl
     clock.advance(dog.cfg.crawl.change_s + 0.01)
     dog.tick()
 
@@ -389,8 +391,18 @@ def enter_crawl(dog, robot, clock):
 def test_crawl_sends_the_app_command_waits_then_drives_with_move():
     dog, robot, clock = settled_dog(z=0.385)
     dog.set_crawl(True)
-    assert apps(robot) == [CMD_CRAWL]
+    assert apps(robot) == [CMD_STAND]            # dog_task only turns 106 into crawl after an app stand
     assert dog.crawling and dog.body_moving and not dog.settled()
+    with pytest.raises(SafetyError):
+        dog.set_velocity(0.1)                    # no driving during the change
+    n = len(robot.calls)
+    clock.advance(dog.cfg.crawl.prep_s - 0.1)
+    dog.tick()
+    assert len(robot.calls) == n                 # silent after the app stand
+    clock.advance(0.2)
+    dog.tick()
+    assert apps(robot) == [CMD_STAND, CMD_CRAWL]
+    assert moves(robot)[-1] == (0.0, 0.0, 0.0)   # one keepalive just before the crawl command
     with pytest.raises(SafetyError):
         dog.set_velocity(0.1)                    # no driving while the body goes down
     n = len(robot.calls)
@@ -408,7 +420,8 @@ def test_crawl_sends_the_app_command_waits_then_drives_with_move():
 
 def test_crawl_silence_stays_under_the_robot_watchdog():
     dog, _, _ = settled_dog()
-    assert dog.cfg.crawl.change_s < 3.0 and dog.cfg.crawl.raise_s < 3.0
+    c = dog.cfg.crawl
+    assert c.prep_s <= 3.0 and c.change_s < 3.0 and c.raise_s < 3.0
 
 
 def test_crawl_has_slower_caps():
@@ -425,7 +438,7 @@ def test_crawl_off_sends_the_app_stand_command():
     dog, robot, clock = settled_dog(z=0.385)
     enter_crawl(dog, robot, clock)
     dog.set_crawl(False)
-    assert apps(robot) == [CMD_CRAWL, CMD_STAND]
+    assert apps(robot) == [CMD_STAND, CMD_CRAWL, CMD_STAND]
     assert not dog.crawling and dog.body_moving and not dog.settled()
     n = len(moves(robot))
     dog.tick()
@@ -473,7 +486,7 @@ def test_crawl_needs_standing_still_and_settled():
     dog.tick()
     assert apps(robot) == []                          # nothing was sent while moving
     dog.set_crawl(True)                               # stopped: fine
-    assert apps(robot) == [CMD_CRAWL]
+    assert apps(robot) == [CMD_STAND]
 
 
 def test_crawl_off_also_needs_standing_still():
@@ -483,7 +496,7 @@ def test_crawl_off_also_needs_standing_still():
     dog.tick()
     with pytest.raises(SafetyError, match="stop first"):
         dog.set_crawl(False)
-    assert apps(robot) == [CMD_CRAWL]
+    assert apps(robot) == [CMD_STAND, CMD_CRAWL]
 
 
 def test_crawl_needs_motion_allowed():

@@ -77,6 +77,7 @@ class CameraConfig:
 @dataclass
 class CrawlConfig:
     """Crawl = the robot's low crawl, switched with the app's UDP command (SafeDog.set_crawl)."""
+    prep_s: float            # seconds of silence after the app stand (122), before the app crawl (106)
     change_s: float          # seconds of silence while the body goes down (keep < 3: robot watchdog)
     raise_s: float           # the same while it stands tall again
     min_drop_m: float        # the body must drop at least this much (getPosition z), else "crawl failed"
