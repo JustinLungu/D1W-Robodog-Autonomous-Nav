@@ -529,7 +529,17 @@ The go-to window (§6.7) then shows the tracked boxes. **Click a box** and **hol
 
 Each detection is placed using the pose the robot had when that frame was taken (`trash.camera_delay_s` ago), so the robot's own movement in between cancels out. Clicking the floor instead of a box still sets an ordinary fixed goal.
 
-`--posture` only sets the **camera height used for distances**; it does not make the robot crawl. The SDK's `crawl()` had no effect on our robot (tested 2026-11-15), so the robot has to be in that posture by other means, and `camera.crawl_height_m` (0.20, a first guess) should be measured. The camera's tilt is assumed the same in both postures.
+**Crawling while following:** with `trash.crawl_to_target: true` (default), holding G on a tracked piece first **lowers the body** (the window shows `LOWERING...`, about 2 s, standing still), then follows it at crawl speed. While the body is low, all distances use `camera.crawl_height_m` (0.20, a first guess: measure it). `--posture crawl` sets that height without lowering the body (for `--fake` or recordings). The camera's tilt is assumed the same in both postures.
+
+#### Crawling (X in `robodog-teleop` and `robodog-goto`)
+**X** lowers the body; **X** again raises it. Only while standing still; it takes `crawl.change_s` (2 s), and keys are ignored meanwhile. Lying down (F), the e-stop, or a new stand-up (R) always end up at normal height.
+
+How: the SDK's `crawl()` had no effect on our robot (tested 2026-11-15). So SafeDog lowers the body with `attitudeControl(0, 0, 0, height_vel)` ("body height change while standing" in the vendor docs) for `crawl.change_s` seconds, then drives with the normal `move()`, under the slower caps in the `crawl:` section of `config.local.yaml` (0.15 m/s, 0.10 m/s sideways, 0.30 rad/s). The robot stops lowering at its own limit.
+
+**Untested on the robot.** On the first try (standing, remote in hand, speed level 1), check:
+- **Does the body go down?** If not, raise `crawl.height_vel` (vendor max 0.5) or `crawl.change_s`.
+- **Does it stay down while driving with `move()`?** If it pops back up, tell me: the posture may need to be held differently.
+- **How high is the camera when low?** Measure it into `camera.crawl_height_m`, or the distances will be off.
 
 ---
 

@@ -32,6 +32,13 @@ ESTOP_STOP_S = 0.3
 # that: lieDown(), wait 3 s, passive(). Their remote also has "damping (slowly lie down)".
 LIE_DOWN_S = 3.0
 
+# Crawl = the same standing gait with the body LOWERED. The SDK's crawl() did nothing on our
+# robot (tested 2026-11-15), so we lower the body with attitudeControl(0, 0, 0, height_vel):
+# "body height change while standing" (vendor docs, wheeled robot, height_vel up to 0.5 m/s).
+# While the body moves, the loop sends attitudeControl() instead of move() and motion is
+# refused (settled() is False); afterwards it drives with move() as usual, under the slower
+# caps in the crawl section of config.local.yaml.
+
 
 class SafetyError(RuntimeError):
     """The robot is in a fault state (e-stop, low battery, lost connection...)."""
@@ -96,6 +103,10 @@ class SafeDog:
         self._restand_at: float | None = None  # after a handshake: when to call standUp() again
         self._passive_timer: threading.Timer | None = None  # pending "fully down" step after lieDown()
         self._last_posture = ("start", self.clock())  # last stand/lie/handshake command + when (for warnings)
+        self._crawling = False               # body lowered (after a finished set_crawl(True))
+        self._crawl_target = False           # where the current body-height change is heading
+        self._body_until: float | None = None  # while not None: body moving, loop sends attitudeControl()
+        self._body_vel = 0.0                 # height_vel sent during that change (- = down)
         self._fault: str | None = None       # reason for a latched fault, or None if all is fine
         self._estopped = False               # True after estop(): robot is limp, never touch it again
         self._last_battery_check = -float("inf")  # forces a battery check on the first tick
@@ -147,7 +158,29 @@ class SafeDog:
     def settled(self) -> bool:
         """True once a stand() has finished its STAND_SETTLE_S transition (motion commands accepted)."""
         with self._lock:
-            return self._active and self.clock() >= self._settled_at
+            # A body-height change counts as done only once tick() has applied it, not when its time is up.
+            return self._active and self.clock() >= self._settled_at and self._body_until is None
+
+    @property
+    def crawling(self) -> bool:
+        """True while the body is lowered (or being lowered): crawl speed caps apply."""
+        with self._lock:
+            return self._crawling or (self._body_until is not None and self._crawl_target)
+
+    @property
+    def body_moving(self) -> bool:
+        """True while the body is being lowered or raised (motion is refused meanwhile)."""
+        with self._lock:
+            return self._body_until is not None
+
+    def speed_caps(self) -> tuple[float, float, float]:
+        """The speed limits in force right now (crawl caps while crawling, else the safety caps)."""
+        with self._lock:
+            caps = (self.s.max_vx, self.s.max_vy, self.s.max_yaw)
+            if self._crawling or (self._body_until is not None and self._crawl_target):
+                c = self.cfg.crawl
+                caps = (min(caps[0], c.max_vx), min(caps[1], c.max_vy), min(caps[2], c.max_yaw))
+            return caps
 
     @property
     def fault(self) -> str | None:
@@ -176,6 +209,8 @@ class SafeDog:
                 raise SafetyError(f"battery {battery}% is below min_battery {self.s.min_battery}%; charge first")
             self._cmd = (0.0, 0.0, 0.0)  # start standing still
             self._check_rc("standUp", self.robot.standUp())
+            self._crawling = self._crawl_target = False   # standUp() is the normal height
+            self._body_until = None
             self._active = True          # switches the loop's keepalive on (see tick())
             self._settled_at = self.clock() + STAND_SETTLE_S  # ...but only after the stand-up transition
 
@@ -193,6 +228,8 @@ class SafeDog:
             self._cmd = (0.0, 0.0, 0.0)
             self._active = False         # loop stops sending move() from the next tick
             self._restand_at = None      # cancel a pending re-stand after a handshake
+            self._crawling = self._crawl_target = False   # lying down from low is fine; the next stand is tall
+            self._body_until = None
             # The vendor says lieDown() must not be called while moving, so stop first. Only if
             # it was actually standing: a crouched robot rejects move() ("transition to Move failed").
             if was_standing:
@@ -245,14 +282,44 @@ class SafeDog:
             self._require_motion()
             if not self._active:
                 raise SafetyError("call stand() before set_velocity()")
+            if self._body_until is not None:
+                raise SafetyError("the body is still being lowered / raised (see settled())")
             if self.clock() < self._settled_at:
                 raise SafetyError(f"still standing up: wait {STAND_SETTLE_S:.0f} s after stand() (see settled())")
+            cap_vx, cap_vy, cap_yaw = self.speed_caps()   # crawl caps while crawling
             self._cmd = (
-                _shape(vx, self.s.max_vx, MIN_VX),
-                _shape(vy, self.s.max_vy, MIN_VY),
-                _shape(yaw, self.s.max_yaw, MIN_YAW),
+                _shape(vx, cap_vx, MIN_VX),
+                _shape(vy, cap_vy, MIN_VY),
+                _shape(yaw, cap_yaw, MIN_YAW),
             )
             self._cmd_time = self.clock()  # timestamp for the dead-man switch in tick()
+
+    def set_crawl(self, on: bool):
+        """Lower (on) or raise (off) the body. Only while standing STILL and settled.
+
+        For crawl.change_s the loop sends attitudeControl(0, 0, 0, -/+crawl.height_vel) instead of
+        move(); motion is refused meanwhile (settled() is False). Then normal driving resumes, with
+        the crawl speed caps while lowered.
+        """
+        with self._lock:
+            self._require_motion()
+            if on == self.crawling and self._body_until is None:
+                return
+            if not self._active or self.clock() < self._settled_at:
+                raise SafetyError("crawl only while standing still (wait for the current move to finish)")
+            moving = any(self._cmd) or (self.last_sent is not None and any(self.last_sent))
+            if moving:
+                raise SafetyError("stop first: the body height can only be changed while standing still")
+            c = self.cfg.crawl
+            now = self.clock()
+            self._cmd = (0.0, 0.0, 0.0)
+            self._crawl_target = on
+            self._body_vel = -c.height_vel if on else c.height_vel
+            self._body_until = now + c.change_s
+            self._settled_at = self._body_until      # no motion until the body is there
+            self._last_posture = ("lower body" if on else "raise body", now)
+            self.log(f"{'lowering' if on else 'raising'} the body for {c.change_s:.1f} s "
+                     f"(attitudeControl height_vel {self._body_vel:+.2f} m/s)")
 
     def shake_hand(self):
         """Shake hands, exactly like the vendor demo: shakeHand(), send nothing for SHAKE_HAND_S,
@@ -264,6 +331,8 @@ class SafeDog:
             self._require_motion()
             if not self._active or self.clock() < self._settled_at:
                 raise SafetyError("shake hands only while standing still (wait for the stand-up to finish)")
+            if self._crawling:
+                raise SafetyError("stand tall first (X), then shake hands")
             self._cmd = (0.0, 0.0, 0.0)
             self._check_rc("shakeHand", self.robot.shakeHand())
             self._settled_at = float("inf")                      # no motion until the re-stand is done
@@ -286,6 +355,8 @@ class SafeDog:
             self._fault = f"E-STOP ({reason})"
             self._active = False
             self._restand_at = None
+            self._body_until = None
+            self._crawling = self._crawl_target = False
             self._cmd = (0.0, 0.0, 0.0)
             self.last_sent = (0.0, 0.0, 0.0)  # nothing moves now; don't keep showing the old speed
         # Step 2, outside the lock: tell the robot. Outside so that a slow or stuck SDK
@@ -344,6 +415,16 @@ class SafeDog:
                     self._check_rc("standUp", self.robot.standUp())  # same as the vendor demo
                     self._settled_at = now + STAND_SETTLE_S
                     return
+                if self._body_until is not None:
+                    if now < self._body_until:
+                        # Lowering / raising the body: this is also the keepalive meanwhile.
+                        self._check_rc("attitudeControl", self.robot.attitudeControl(0.0, 0.0, 0.0, self._body_vel))
+                        self.last_sent = (0.0, 0.0, 0.0)
+                        return
+                    self._body_until = None
+                    self._crawling = self._crawl_target
+                    self._cmd = (0.0, 0.0, 0.0)          # start the new posture standing still
+                    self._settled_at = now
                 if now < self._settled_at:
                     return  # still standing up: don't interrupt the transition
 
@@ -370,6 +451,8 @@ class SafeDog:
         was_active = self._active
         self._active = False
         self._restand_at = None
+        self._body_until = None
+        self._crawling = self._crawl_target = False
         self._cmd = (0.0, 0.0, 0.0)
         self.last_sent = (0.0, 0.0, 0.0)
         self.log(f"!!! halting: {reason}")

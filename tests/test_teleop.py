@@ -162,3 +162,53 @@ def test_handshake_key_ignores_motion_until_standing_again(monkeypatch):
     assert robot.calls[-1][0] == "standUp" or len(robot.calls_named("standUp")) == 2
     drive(tele, dog, {"forward"}, 0.2)        # stand-up pause is 0 in these tests
     assert tele.state().cmd[0] > 0 and "hold W/A/S/D" in tele.message
+
+
+
+# --- crawl (X) ---------------------------------------------------------------------------
+
+def crawl_ready(change_s=0.05):
+    tele, dog, robot = make()
+    dog.cfg.crawl.change_s = change_s          # real clock here: keep the body change short
+    tele.action("stand")
+    drive(tele, dog, set(), 0.1)
+    return tele, dog, robot
+
+
+def test_x_lowers_the_body_then_drives_slower():
+    import time
+    tele, dog, robot = crawl_ready()
+    tele.action("crawl")
+    assert dog.crawling and tele.state().crawling and tele.state().body_moving
+    drive(tele, dog, {"forward"}, 0.04)
+    assert robot.calls_named("attitudeControl")[-1][4] < 0      # lowering
+    time.sleep(0.06)
+    drive(tele, dog, set(), 0.1)                                 # change done
+    assert not tele.state().body_moving and "CRAWLING" in tele.message
+    tele.action("speed_3")
+    drive(tele, dog, {"forward"}, 2.0)
+    assert tele.state().cmd[0] == pytest.approx(min(dog.cfg.crawl.max_vx, dog.cfg.safety.max_vx))
+
+
+def test_x_again_raises_the_body():
+    import time
+    tele, dog, robot = crawl_ready()
+    tele.action("crawl")
+    time.sleep(0.06)
+    drive(tele, dog, set(), 0.1)
+    tele.action("crawl")
+    drive(tele, dog, set(), 0.04)
+    assert robot.calls_named("attitudeControl")[-1][4] > 0      # raising
+    time.sleep(0.06)
+    drive(tele, dog, set(), 0.1)
+    assert not dog.crawling and "standing" in tele.message
+
+
+def test_x_needs_standing_and_stopped():
+    tele, dog, _ = make()
+    tele.action("crawl")
+    assert not dog.crawling and "stand up first" in tele.message
+    tele.action("stand")
+    drive(tele, dog, {"forward"}, 0.5)
+    tele.action("crawl")                                         # keys still held
+    assert not dog.crawling and "stop first" in tele.message

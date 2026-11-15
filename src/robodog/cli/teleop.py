@@ -18,6 +18,7 @@ are ignored, and clicking away stops the robot.
   S / Down    backward                F      lie down
   A / Left    turn left               1 2 3  speed level (slow / medium / max cap)
   D / Right   turn right              H      shake hands (~7 s, then standing again)
+                                      X      crawl on/off: lower / raise the body (~2 s, standing still)
                                       SPACE  E-STOP (stop + lie down, latched)
   Q / E       sideways left / right   Esc    lie down and quit (also: close the window)
 
@@ -54,7 +55,7 @@ def key_maps():
         pg.K_q: "strafe_left", pg.K_e: "strafe_right",
     }
     click = {
-        pg.K_r: "stand", pg.K_f: "lie_down", pg.K_h: "shake_hand",
+        pg.K_r: "stand", pg.K_f: "lie_down", pg.K_h: "shake_hand", pg.K_x: "crawl",
         pg.K_1: "speed_1", pg.K_2: "speed_2", pg.K_3: "speed_3",
         pg.K_KP1: "speed_1", pg.K_KP2: "speed_2", pg.K_KP3: "speed_3",
         pg.K_SPACE: "estop", pg.K_ESCAPE: "quit",
@@ -71,7 +72,12 @@ def draw(screen, fonts, st, status, fake, rec=None, obstacle=None):
     if st.fault:
         title, color = ("E-STOP" if "E-STOP" in st.fault else "FAULT"), RED
     elif st.standing:
-        title, color = ("MOVING" if any(st.cmd) else "STANDING"), (GREEN if any(st.cmd) else BLUE)
+        if st.body_moving:
+            title, color = ("LOWERING..." if st.crawling else "RAISING..."), AMBER
+        elif st.crawling:
+            title, color = ("CRAWLING" if any(st.cmd) else "CRAWL (still)"), (GREEN if any(st.cmd) else BLUE)
+        else:
+            title, color = ("MOVING" if any(st.cmd) else "STANDING"), (GREEN if any(st.cmd) else BLUE)
     else:
         title, color = "LYING DOWN", DIM
     screen.blit(big.render(title, True, color), (20, 14))
@@ -102,7 +108,7 @@ def draw(screen, fonts, st, status, fake, rec=None, obstacle=None):
 
     help_lines = [
         "HOLD  W/S fwd/back   A/D turn   Q/E sideways   (arrows too)",
-        "CLICK R stand   F lie down   H handshake   1/2/3 speed   SPACE e-stop   Esc quit",
+        "CLICK R stand  F lie  H handshake  X crawl  1/2/3 speed  SPACE e-stop  Esc quit",
     ]
     for h in help_lines:
         screen.blit(small.render(h, True, DIM), (20, y)); y += 22

@@ -360,3 +360,115 @@ def test_error_warning_says_mode_and_time_since_last_posture_command():
     dog.tick()
     warning = [m for m in logs if "12295" in m][-1]
     assert "robot mode 1" in warning and "3.05 s after standUp" in warning
+
+
+# ---------------------------------------------------------------- crawl (body lowered)
+from robodog import safety as _safety
+
+
+def settled_dog():
+    dog, robot, clock = make()
+    dog.stand()
+    clock.advance(_safety.STAND_SETTLE_S + 0.1)
+    dog.tick()
+    return dog, robot, clock
+
+
+def attitudes(robot):
+    return [c[1:] for c in robot.calls_named("attitudeControl")]
+
+
+def test_crawl_lowers_the_body_then_drives_with_move():
+    dog, robot, clock = settled_dog()
+    c = dog.cfg.crawl
+    dog.set_crawl(True)
+    assert dog.crawling and dog.body_moving and not dog.settled()
+    with pytest.raises(SafetyError):
+        dog.set_velocity(0.1)                         # no driving while the body moves
+    n_moves = len(moves(robot))
+    dog.tick()
+    assert attitudes(robot)[-1] == (0.0, 0.0, 0.0, -c.height_vel)   # lowering, instead of move()
+    assert len(moves(robot)) == n_moves
+    clock.advance(c.change_s + 0.01)
+    dog.tick()
+    assert not dog.body_moving and dog.crawling and dog.settled()
+    dog.set_velocity(0.1)
+    dog.tick()
+    assert moves(robot)[-1] == (0.1, 0.0, 0.0)
+
+
+def test_crawl_has_slower_caps():
+    dog, robot, clock = settled_dog()
+    dog.set_crawl(True)
+    clock.advance(dog.cfg.crawl.change_s + 0.01)
+    dog.tick()
+    dog.set_velocity(5.0, 5.0, 5.0)
+    dog.tick()
+    c = dog.cfg.crawl
+    assert moves(robot)[-1] == (min(c.max_vx, 0.3), min(c.max_vy, 0.2), min(c.max_yaw, 0.5))
+    assert dog.speed_caps() == (min(c.max_vx, 0.3), min(c.max_vy, 0.2), min(c.max_yaw, 0.5))
+
+
+def test_crawl_off_raises_the_body():
+    dog, robot, clock = settled_dog()
+    dog.set_crawl(True)
+    clock.advance(dog.cfg.crawl.change_s + 0.01)
+    dog.tick()
+    dog.set_crawl(False)
+    dog.tick()
+    assert attitudes(robot)[-1][3] == dog.cfg.crawl.height_vel   # raising
+    assert dog.crawling and dog.body_moving        # still low: crawl caps apply until it's fully up
+    clock.advance(dog.cfg.crawl.change_s + 0.01)
+    dog.tick()
+    assert not dog.crawling and dog.settled() and dog.speed_caps() == (0.3, 0.2, 0.5)
+
+
+def test_crawl_needs_standing_still_and_settled():
+    dog, robot, clock = make()
+    with pytest.raises(SafetyError):
+        dog.set_crawl(True)                           # lying
+    dog.stand()
+    with pytest.raises(SafetyError):
+        dog.set_crawl(True)                           # still standing up
+    clock.advance(_safety.STAND_SETTLE_S + 0.1)
+    dog.tick()
+    dog.set_velocity(0.2)
+    with pytest.raises(SafetyError, match="stop first"):
+        dog.set_crawl(True)                           # moving
+    dog.tick()
+    dog.set_velocity(0.0)
+    dog.tick()
+    dog.set_crawl(True)                               # stopped: fine
+
+
+def test_crawl_needs_motion_allowed():
+    dog, _, _ = make(allow_motion=False)
+    with pytest.raises(MotionBlocked):
+        dog.set_crawl(True)
+
+
+def test_lying_down_or_estop_forgets_crawl_and_next_stand_is_tall():
+    dog, robot, clock = settled_dog()
+    dog.set_crawl(True)
+    clock.advance(dog.cfg.crawl.change_s + 0.01)
+    dog.tick()
+    dog.lie_down()
+    assert not dog.crawling
+    dog.stand()
+    assert not dog.crawling
+    clock.advance(_safety.STAND_SETTLE_S + 0.1)
+    dog.tick()
+    dog.set_crawl(True)
+    dog.estop()
+    n = len(attitudes(robot))
+    dog.tick()
+    assert not dog.crawling and len(attitudes(robot)) == n   # nothing more sent after the e-stop
+
+
+def test_no_handshake_while_crawling():
+    dog, robot, clock = settled_dog()
+    dog.set_crawl(True)
+    clock.advance(dog.cfg.crawl.change_s + 0.01)
+    dog.tick()
+    with pytest.raises(SafetyError, match="stand tall"):
+        dog.shake_hand()

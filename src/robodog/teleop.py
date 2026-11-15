@@ -25,9 +25,10 @@ MOTION = {
     "strafe_left": (1, +1), "strafe_right": (1, -1),
     "turn_left": (2, +1), "turn_right": (2, -1),
 }
-ACTIONS = ("stand", "lie_down", "shake_hand", "speed_1", "speed_2", "speed_3", "estop", "quit")
+ACTIONS = ("stand", "lie_down", "shake_hand", "crawl", "speed_1", "speed_2", "speed_3", "estop", "quit")
 
-# Speed levels as a fraction of the caps in config.local.yaml (max_vx / max_vy / max_yaw).
+# Speed levels as a fraction of the caps in config.local.yaml (max_vx / max_vy / max_yaw;
+# while crawling, the crawl section's caps).
 SPEED_LEVELS = {1: 0.33, 2: 0.66, 3: 1.0}
 
 # How fast the speed builds up after a key is pressed (per second).
@@ -43,6 +44,8 @@ class TeleopState:
     cmd: tuple[float, float, float]
     message: str
     fault: str | None
+    crawling: bool = False
+    body_moving: bool = False
 
 
 class Teleop:
@@ -93,6 +96,17 @@ class Teleop:
                 self.dog.stand()
                 self.standing = True
                 self.message = "standing up... (keys ignored for 3 s)"
+            elif name == "crawl":
+                if not self.standing:
+                    self.message = "stand up first (R), then X to crawl"
+                    return
+                if self.held or any(self._cur):
+                    self.message = "stop first: release the keys, then press X"
+                    return
+                on = not self.dog.crawling
+                self.dog.set_crawl(on)   # refused (message below) while standing up / moving
+                self.message = ("lowering the body... (keys ignored ~2 s)" if on
+                                else "raising the body... (keys ignored ~2 s)")
             elif name == "shake_hand":
                 if not self.standing:
                     return
@@ -114,7 +128,7 @@ class Teleop:
     def target(self) -> tuple[float, float, float]:
         """Speed wanted from the keys held right now (before ramping)."""
         frac = SPEED_LEVELS[self.level]
-        caps = (self.s.max_vx, self.s.max_vy, self.s.max_yaw)
+        caps = self.dog.speed_caps()   # the crawl caps while crawling
         mins = (MIN_VX, MIN_VY, MIN_YAW)
         out = [0.0, 0.0, 0.0]
         for name in self.held:
@@ -140,8 +154,9 @@ class Teleop:
             # so holding W during the stand-up doesn't make it lurch the moment it's done.
             self._cur = [0.0, 0.0, 0.0]
             return
-        if self.message.startswith(("standing up", "shaking hands")):
-            self.message = "standing. hold W/A/S/D (or arrows) to drive"
+        if self.message.startswith(("standing up", "shaking hands", "lowering the body", "raising the body")):
+            self.message = ("CRAWLING (body low). drive as usual, X to stand tall" if self.dog.crawling
+                            else "standing. hold W/A/S/D (or arrows) to drive")
         tgt = self.target()
         for i in range(3):
             released = tgt[i] == 0.0
@@ -170,7 +185,7 @@ class Teleop:
 
     def state(self) -> TeleopState:
         return TeleopState(self.standing, self.level, frozenset(self.held),
-                           tuple(self._cur), self.message, self.dog.fault)
+                           tuple(self._cur), self.message, self.dog.fault, self.dog.crawling, self.dog.body_moving)
 
 
 class ObstacleBanner:

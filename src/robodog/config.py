@@ -75,6 +75,16 @@ class CameraConfig:
 
 
 @dataclass
+class CrawlConfig:
+    """Crawl = drive with the body lowered (SafeDog.set_crawl)."""
+    height_vel: float        # m/s body lowering/raising speed for attitudeControl (vendor max 0.5)
+    change_s: float          # how long to lower/raise: height change ~ height_vel x change_s
+    max_vx: float            # speed caps while crawling (the safety caps still apply on top)
+    max_vy: float
+    max_yaw: float
+
+
+@dataclass
 class GoToConfig:
     """Limits for driving to a clicked goal (robodog-goto)."""
     max_goal_m: float        # refuse goals further away than this
@@ -94,6 +104,7 @@ class TrashConfig:
     conf: float              # confidence needed to START tracking a piece (0-1)
     imgsz: int               # detector input size in pixels (bigger = finds smaller things, slower)
     follow_vx: float         # m/s while driving to a tracked target (slow, so the tracker keeps up)
+    crawl_to_target: bool    # lower the body (crawl) before following a tracked target
     camera_delay_s: float    # how old a camera frame is when it reaches the laptop
     lost_after_s: float      # not seen for this long -> drive on blind (odometry only)
     reacquire_m: float       # a new track this close to the goal is taken as the same object
@@ -114,6 +125,7 @@ class Config:
     network: NetworkConfig
     safety: SafetyConfig
     camera: CameraConfig
+    crawl: CrawlConfig
     goto: GoToConfig
     trash: TrashConfig
     obstacles: ObstaclesConfig
@@ -194,7 +206,7 @@ def load_config(path: str | Path | None = None, machine_path: str | Path | None 
     raw = yaml.safe_load(path.read_text()) or {}
     machine = _load_machine(machine_path)
 
-    unknown = raw.keys() - {"network", "safety", "camera", "goto", "trash", "obstacles"}
+    unknown = raw.keys() - {"network", "safety", "camera", "crawl", "goto", "trash", "obstacles"}
     misplaced = unknown & _MACHINE_KEYS.keys()
     misplaced |= {k for k in ("laptop_ip",) if isinstance(raw.get("network"), dict) and k in raw["network"]}
     misplaced |= {k for k in ("allow_motion",) if isinstance(raw.get("safety"), dict) and k in raw["safety"]}
@@ -216,6 +228,7 @@ def load_config(path: str | Path | None = None, machine_path: str | Path | None 
         network=net,
         safety=_build(SafetyConfig, {**safety, "allow_motion": machine["allow_motion"]}, "safety", path),
         camera=_build(CameraConfig, raw.get("camera"), "camera", path),
+        crawl=_build(CrawlConfig, raw.get("crawl"), "crawl", path),
         goto=_build(GoToConfig, raw.get("goto"), "goto", path),
         trash=_build(TrashConfig, raw.get("trash"), "trash", path),
         obstacles=_build(ObstaclesConfig, raw.get("obstacles"), "obstacles", path),

@@ -20,6 +20,7 @@ distances, and drive with the teleop keys.
   HOLD    G                      go to the goal. Let go = stop (the goal is kept)
   HOLD    W/S A/D Q/E (arrows)   drive by hand, like robodog-teleop (overrides G)
   CLICK   R stand   F lie down   C clear goal   1/2/3 speed (hand driving)
+          X  crawl on/off: lower / raise the body (~2 s, standing still). Distances follow the posture
           K  calibrate: click the bases of objects at the --calib-distances, in that order
           SPACE  E-STOP (stop + lie down, latched)    Esc  lie down and quit
 
@@ -146,8 +147,10 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
     fh, fw = frame.shape[:2]
     lens, hfov, pitch = args.lens or cam_cfg.lens, args.hfov or cam_cfg.hfov_deg, cam_cfg.pitch_deg
 
-    # The lens is lower in the crawl posture: every distance depends on this height.
-    cam_height = cam_cfg.height_m if args.posture == "stand" else cam_cfg.crawl_height_m
+    # The lens is lower in the crawl posture: every distance depends on this height. It follows
+    # the robot: crawl height while the body is lowered (X), else what --posture says.
+    cam_posture = args.posture
+    cam_height = cam_cfg.height_m if cam_posture == "stand" else cam_cfg.crawl_height_m
 
     def make_model():
         return CameraModel(fw, fh, hfov, cam_height, pitch, cam_cfg.forward_offset_m, lens)
@@ -265,6 +268,16 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
             now = time.monotonic()
             dt, last = now - last, now
             history.add(now, pose)
+            # Camera height follows the posture once a body change has finished.
+            want = "crawl" if (dog.crawling and not dog.body_moving) else args.posture
+            if want != cam_posture and not dog.body_moving:
+                cam_posture = want
+                cam_height = cam_cfg.height_m if want == "stand" else cam_cfg.crawl_height_m
+                model = make_model()
+                grid = grid_polylines(model)
+                if watcher is not None:   # re-place the current boxes with the new camera height
+                    sightings = [to_sighting(t, model) for t in tracks]
+                message = f"camera height now {cam_height:.2f} m ({want})"
             if watcher is not None:
                 new_tracks, stamp, seq, trash_rate = watcher.latest()
                 if seq != trash_seq:   # a new detector result: place the boxes on the floor, correct the goal
@@ -272,13 +285,23 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
                     sightings = [to_sighting(t, model) for t in tracks]
                     # The frame is old by the time it's analysed: use the pose the robot had back then.
                     pose_then = history.at(stamp - cfg.trash.camera_delay_s) or pose
-                    follower.update(sightings, pose_then, now)
+                    if not dog.body_moving:   # mid-change the camera height is unknown: don't trust the distances
+                        follower.update(sightings, pose_then, now)
                 follower.tick(now)
                 if watcher.error:
                     message = watcher.error
             # Slow while going to a tracked piece, so the tracker keeps up; normal speed otherwise.
             limits.max_vx = min(base_max_vx, cfg.trash.follow_vx) if follower.track_id is not None else base_max_vx
             going = (g_held and not hand and drive_ok and tele.standing and dog.settled() and not dog.fault)
+            # Going to a tracked piece: lower the body first (trash.crawl_to_target), then follow it.
+            if (going and cfg.trash.crawl_to_target and follower.track_id is not None and goto.goal is not None
+                    and not dog.crawling):
+                going = False             # this frame: stand still (the body may only change while still)
+                try:
+                    dog.set_crawl(True)
+                    message = "lowering the body before following the target... (keep holding G)"
+                except SafetyError as e:
+                    message = f"waiting to crawl: {e}"
             if hand and goto.goal is not None and goto.lim.odometry == "commanded":
                 # Our own position count only knows go-to's commands, not hand driving.
                 goto.clear()
@@ -382,9 +405,10 @@ def draw(screen, fonts, frame, scale, view_h, model, grid, goto, step, pose, tel
     elif not tele.standing:
         title, col = "LYING DOWN", DIM
     elif step.state in ("turning", "driving"):
-        title, col = f"GOING ({step.state})", GREEN
+        title, col = f"{'CRAWLING' if tele.dog.crawling else 'GOING'} ({step.state})", GREEN
     else:
-        title, col = "STANDING", BLUE
+        title, col = (("LOWERING..." if tele.dog.crawling else "RAISING...") if tele.dog.body_moving
+                      else ("CRAWL (still)" if tele.dog.crawling else "STANDING")), BLUE
     screen.blit(big.render(title, True, col), (12, y))
     tags = ("FAKE ROBOT  " if fake else "") + ("" if drive_ok else "CAMERA NOT MEASURED: G off")
     if tags:
@@ -425,7 +449,7 @@ def draw(screen, fonts, frame, scale, view_h, model, grid, goto, step, pose, tel
     msg = tele.state().fault or message
     screen.blit(small.render(msg[:120], True, RED if tele.state().fault else AMBER), (12, y))
     y += 22
-    for h in ("CLICK floor/box = goal   HOLD G = go   HOLD WASD/QE = hand drive   R stand  F lie  C clear  K calibrate",
+    for h in ("CLICK floor/box = goal   HOLD G = go   HOLD WASD/QE = hand drive   R stand  F lie  X crawl  C clear  K calib",
               "SPACE e-stop   Esc quit   (window must have focus)"):
         screen.blit(small.render(h, True, DIM), (12, y))
         y += 18
@@ -447,8 +471,9 @@ def main():
     ap.add_argument("--trash", action="store_true",
                     help="detect + track trash (needs the vision extra): click a box to go to that piece")
     ap.add_argument("--posture", choices=["stand", "crawl"], default="stand",
-                    help="camera height used for all distances: stand = camera.height_m, crawl = "
-                         "camera.crawl_height_m. This does NOT change how the robot moves (default: stand)")
+                    help="camera height for distances while the body is NOT lowered with X (stand = "
+                         "camera.height_m, crawl = camera.crawl_height_m; e.g. for --fake / recordings). "
+                         "Lowering the body with X switches to crawl height automatically (default: stand)")
     ap.add_argument("--calib-distances", default="1.5,2.5,3.0",
                     help="K calibration: distances of the objects you'll click, in click order, measured ON THE "
                          "FLOOR from the point under the camera lens (default 1.5,2.5,3.0). One distance fits only "

@@ -26,10 +26,21 @@ camera:
   lens: "fisheye"
   hfov_deg: 96.0          # fitted with K (3 objects, worst 3 %)
   height_m: 0.40           # measured 2026-11-15: floor to lens centre, robot standing
-  crawl_height_m: 0.20     # the same in the low crawl posture (--posture crawl). First guess, not measured
+  crawl_height_m: 0.20     # the same with the body lowered (X key / --posture crawl). First guess: measure it
   pitch_deg: -8.7         # fitted with K: looking 8.7 deg up
   forward_offset_m: 0.4        # measured: lens in front of the robot's centre
   measured: true          # set true once the three values above are real: go-to driving needs it
+
+# Crawl (X key in robodog-teleop and robodog-goto): drive with the body LOWERED. The SDK's
+# crawl() did nothing on our robot, so the body is lowered with attitudeControl(height_vel)
+# for change_s seconds, then the robot drives with the normal move() under these slower caps.
+# Untested on the robot: whether it stays low while driving (watch it, and camera.crawl_height_m).
+crawl:
+  height_vel: 0.10     # m/s body lowering/raising speed (vendor max 0.5)
+  change_s: 2.0        # seconds of lowering/raising: ~0.10 x 2.0 = 20 cm (the robot stops at its own limit)
+  max_vx: 0.15         # m/s while crawling (safety.max_vx still caps it)
+  max_vy: 0.10         # m/s sideways while crawling
+  max_yaw: 0.30        # rad/s while crawling
 
 goto:
   max_goal_m: 3.0          # refuse clicked goals further away than this
@@ -59,6 +70,7 @@ trash:
                          # (An existing track is continued with weaker detections too, down to 0.1.)
   imgsz: 896             # detector input size (this model was trained at 896). 640 is ~2x faster
   follow_vx: 0.10        # m/s while driving to a tracked piece: slow, so the tracker keeps up
+  crawl_to_target: true  # holding G on a tracked piece first lowers the body (crawl section), then follows it
   camera_delay_s: 0.3    # how old a camera frame is when it arrives (camera + Wi-Fi)
   lost_after_s: 1.0      # not seen for this long -> finish blind, on odometry
   reacquire_m: 0.4       # the tracker renamed the piece: a track this close to the goal is taken as the same

@@ -76,6 +76,10 @@ class FakeHighLevel:
         self._vel = (0.0, 0.0, 0.0)
         return 0
 
+    def attitudeControl(self, roll_vel, pitch_vel, yaw_vel, height_vel):
+        self._record("attitudeControl", float(roll_vel), float(pitch_vel), float(yaw_vel), float(height_vel))
+        return 0
+
     def shakeHand(self):
         self._record("shakeHand")
         return 0
