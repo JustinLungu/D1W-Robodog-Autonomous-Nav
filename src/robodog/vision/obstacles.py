@@ -85,6 +85,7 @@ class ObstacleResult:
 # What each pixel was judged as (ObstacleResult.classes), with its display colour (BGR).
 # Only RED triggers the warning. The others show what was seen and why it was left out.
 CLASSES = {
+    5: ("the target go-to drives to (ignored)", (80, 200, 80)),
     4: ("in path, close: WARNS", (40, 40, 255)),
     3: ("in path, beyond the warning line", (0, 165, 255)),
     2: ("close, but beside the path", (255, 120, 40)),
@@ -114,7 +115,9 @@ class ObstacleChecker:
                 c.vanish_x + (c.path_bottom[1] - c.vanish_x) * tw,
                 horizon - c.height_ratio * (c.warn_row - horizon))
 
-    def check(self, disparity: np.ndarray) -> ObstacleResult:
+    def check(self, disparity: np.ndarray, ignore: tuple[float, float, float, float] | None = None) -> ObstacleResult:
+        """ignore: a box (left, top, right, bottom as fractions of the image) whose pixels are never an
+        obstacle: the piece go-to is driving to, which is in the path by definition."""
         c = self.cfg
         H, W = disparity.shape
         w = c.work_width
@@ -178,6 +181,11 @@ class ObstacleChecker:
         # the box could still warn. Its bottom stays open: below it = nearer = must warn.)
         box_left, box_right, box_top = self.box(horizon)
         sticks_up = (t > 0) & ((foot - self._v) > c.stick_out)  # the floor itself has foot == v
+        target = np.zeros(d.shape, bool)
+        if ignore is not None:   # the target: in the path on purpose, not an obstacle
+            u0, v0, u1, v1 = ignore
+            target = (self._u >= u0) & (self._u <= u1) & (self._v >= v0) & (self._v <= v1)
+            sticks_up &= ~target
         beside = (self._u < np.maximum(left, box_left)) | (self._u > np.minimum(right, box_right))
         above = self._v < np.maximum(top, box_top)
         close = foot >= c.warn_row                         # stands on or before the warning line
@@ -190,6 +198,7 @@ class ObstacleChecker:
         classes[sticks_up & close & beside] = 2
         classes[in_path & ~close] = 3
         classes[obstacle] = 4
+        classes[target] = 5
 
         # Nearness: 1/distance relative to the warning line (distance ~ 1/(foot - horizon)).
         if in_path.mean() >= c.min_area:

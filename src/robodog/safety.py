@@ -100,6 +100,10 @@ class SafeDog:
         self._estopped = False               # True after estop(): robot is limp, never touch it again
         self._last_battery_check = -float("inf")  # forces a battery check on the first tick
         self.last_sent: tuple[float, float, float] | None = None  # last move() actually sent (for display)
+        # Forward block: a function returning why forward driving isn't allowed right now
+        # (e.g. "OBSTACLE AHEAD"), or None if it is. Asked every tick; see tick() step 6.
+        self.forward_guard: Callable[[], str | None] | None = None
+        self.forward_blocked: str | None = None   # the guard's latest answer (for display)
 
         # --- the loop thread ---
         self._thread: threading.Thread | None = None
@@ -317,6 +321,7 @@ class SafeDog:
           3. battery too low?     -> halt   (checked once per battery_check_period, not every tick)
           4. not standing?        -> send nothing
           5. otherwise            -> send move() with the latest speed, or 0 if it's stale (dead-man)
+                                     and forward speed 0 while the forward guard says blocked
         """
         with self._lock:
             if self._fault:
@@ -351,6 +356,9 @@ class SafeDog:
                 # (it crashed, froze, or forgot), send 0 instead of the old speed.
                 stale = now - self._cmd_time > self.s.cmd_timeout
                 cmd = (0.0, 0.0, 0.0) if stale else self._cmd
+                # Forward block (obstacle ahead): no forward speed, whoever asked for it.
+                # Backward, sideways and turning still go through, to get away from it.
+                cmd = self._apply_forward_block(cmd)
                 # Sending every tick, even when it's (0,0,0), is also the keepalive:
                 # the robot lies down by itself after 3 s without commands.
                 self._check_rc("move", self.robot.move(*cmd))
@@ -359,6 +367,22 @@ class SafeDog:
                 # Any surprise from the SDK (network error, crash in the library...)
                 # is treated as a fault, never ignored.
                 self._halt(f"SDK error: {e!r}")
+
+    def _apply_forward_block(self, cmd: tuple[float, float, float]) -> tuple[float, float, float]:
+        """Ask the forward guard (if any); while it says blocked, forward speed becomes 0.
+        A guard that crashes counts as blocked: when in doubt, don't drive forward."""
+        if self.forward_guard is None:
+            return cmd
+        try:
+            reason = self.forward_guard()
+        except Exception as e:
+            reason = f"obstacle check failed: {e!r}"
+        if reason != self.forward_blocked:
+            self.log(f"forward BLOCKED: {reason}" if reason else "forward allowed again")
+            self.forward_blocked = reason
+        if reason and cmd[0] > 0:
+            return (0.0, cmd[1], cmd[2])
+        return cmd
 
     def _halt(self, reason: str):
         """Controlled stop after a problem: zero speed, try to lie down, latch a fault.

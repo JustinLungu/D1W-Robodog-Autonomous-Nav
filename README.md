@@ -428,15 +428,18 @@ Speed: ~5–8 s per frame on a laptop CPU, so it analyses 1 frame per second of 
 
 This is a starting point, not a final detector. The next step is to fix and confirm its boxes on our own frames, then train a small, fast detector (YOLO) on them that can run live.
 
-### 6.9 Obstacle warning from the camera (experimental, warning only)
-Warns when something is in the robot's path, using only the RGB camera and Depth Anything (§6.6). **It shows a message. It does not stop the robot**, and it is not a safety feature: the person with the remote still is.
+### 6.9 Obstacle check from the camera: forward block (experimental)
+Detects things in the robot's path, using only the RGB camera and Depth Anything (§6.6). With `--obstacles` in teleop or go-to, **forward driving is blocked** while something is ahead: SafeDog sets forward speed to 0 whoever asks for it (keys or go-to). **Backward, turning and sideways still work**, to get away. It's a camera-only check with blind spots (see *Known limits*), so keep the e-stop at hand.
 
 ```bash
 uv run robodog-obstacles                                        # live view: see what it detects, tune it
 uv run robodog-obstacles --source recordings/<run>/video.mkv    # the same on a recording
-uv run robodog-teleop --allow-motion --obstacles                # the warning inside the teleop window
+uv run robodog-teleop --allow-motion --obstacles                # teleop with the forward block + camera view
+uv run robodog-goto --allow-motion --obstacles                  # go-to with the forward block (also with --trash)
 ```
-In teleop a red **OBSTACLE AHEAD** bar appears. With `--record`, the start and end of each warning go into `commands.csv` (`obstacle_warn near=…`, `obstacle_clear`). If the camera picture is older than 1.5 s the window says so instead of claiming the path is clear.
+**How the block works** ([teleop.py](src/robodog/teleop.py) `ForwardGuard`, [safety.py](src/robodog/safety.py) `forward_guard`): every control tick (30 per second) SafeDog asks the guard, and while it gives a reason, the forward part of every command is 0. **When it isn't sure, it blocks:** an obstacle (held 1 s after the last sighting), no picture yet (forward is blocked until the depth model runs), a picture older than 1.5 s, or a crashed check. The terminal logs `forward BLOCKED: ...` / `forward allowed again`. Teleop shows the camera picture with the marks and a red **FORWARD BLOCKED** bar; go-to **pauses** (the goal is kept, its timeout clock stops) and continues when the path is clear. Go-to runs the check on its own camera stream (no second stream).
+
+**Going to trash** (`robodog-goto --trash --obstacles`): the piece itself is in the robot's path, so the check leaves out the selected piece's box (YOLO's, or CSRT's while YOLO lost it), grown by `obstacles.target_margin` (3 % of the picture) on every side. Those pixels are drawn **green** ("the target") instead of red. Anything else in the path, even right next to the piece, still blocks. If the piece isn't tracked at that moment, nothing is left out and it blocks as usual (safe side). With `--record`, the start and end of each warning go into `commands.csv` (`obstacle_warn near=…`, `obstacle_clear`). If the camera picture is older than 1.5 s the window says so instead of claiming the path is clear.
 
 **How it decides** ([obstacles.py](src/robodog/vision/obstacles.py)):
 1. Depth Anything only gives *relative* depth, and the floor right in front is the nearest thing in the picture. So each frame it fits a flat **floor plane** through the floor pixels. That cancels the model's unknown scale and offset, and the robot's pitching.

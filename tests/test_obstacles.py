@@ -8,7 +8,7 @@ the disparity of the floor at its foot.
 import numpy as np
 import pytest
 
-from robodog.teleop import ObstacleBanner
+from robodog.teleop import ForwardGuard, ObstacleBanner
 from robodog.vision.obstacles import ObstacleChecker, ObstacleConfig, ObstacleResult, draw_overlay
 
 W, H = 384, 216
@@ -175,3 +175,89 @@ def test_box_matches_the_drawing():
     row = int(CFG.warn_row * (H - 1))                     # the box's bottom edge (the legend is yellow too)
     cols = np.where(yellow[row - 1:row + 2].any(axis=0))[0]
     assert abs(cols.min() / (W - 1) - left) < 0.02 and abs(cols.max() / (W - 1) - right) < 0.02
+
+
+# --- forward block: the guard + SafeDog ------------------------------------------------
+
+class FakeWatcher:
+    def __init__(self):
+        self.res, self.age, self.error = None, float("inf"), None
+
+    def latest(self):
+        return self.res, self.age, 15.0
+
+
+def guard_with(status=None, age=0.2, error=None):
+    w = FakeWatcher()
+    w.res, w.age, w.error = (result(status) if status else None), age, error
+    return ForwardGuard(w, clock=lambda: 100.0), w
+
+
+def test_guard_blocks_unless_sure_the_path_is_clear():
+    assert guard_with("clear")[0].blocked() is None
+    assert "OBSTACLE" in guard_with("warning")[0].blocked()
+    assert guard_with("blocked")[0].blocked()
+    assert guard_with(None)[0].blocked()                          # no picture yet
+    assert guard_with("clear", age=3.0)[0].blocked()              # old picture
+    assert guard_with("clear", error="camera stream ended")[0].blocked()
+
+
+def standing_dog():
+    import test_safety as ts
+    from robodog.safety import STAND_SETTLE_S
+    dog, robot, clock = ts.make()
+    dog.stand()
+    clock.advance(STAND_SETTLE_S + 0.1)
+    dog.tick()
+    return dog, robot, ts.moves
+
+
+def test_safedog_drops_only_forward_speed_while_blocked():
+    dog, robot, moves = standing_dog()
+    reason = {"r": "OBSTACLE AHEAD"}
+    dog.forward_guard = lambda: reason["r"]
+    dog.set_velocity(0.2, 0.15, 0.3)
+    dog.tick()
+    assert moves(robot)[-1] == (0.0, 0.15, 0.3)          # forward refused, sideways + turning kept
+    dog.set_velocity(-0.2)
+    dog.tick()
+    assert moves(robot)[-1] == (-0.2, 0.0, 0.0)          # backward still allowed
+    reason["r"] = None
+    dog.set_velocity(0.2)
+    dog.tick()
+    assert moves(robot)[-1] == (0.2, 0.0, 0.0) and dog.forward_blocked is None
+
+
+def test_safedog_treats_a_crashing_guard_as_blocked():
+    dog, robot, moves = standing_dog()
+    def broken():
+        raise RuntimeError("boom")
+    dog.forward_guard = broken
+    dog.set_velocity(0.2)
+    dog.tick()
+    assert moves(robot)[-1] == (0.0, 0.0, 0.0) and "boom" in dog.forward_blocked and dog.fault is None
+
+
+# --- go-to's target is not an obstacle ---------------------------------------------------
+
+TARGET = (0.45, 0.65, 0.60, 0.95)    # the trash piece go-to drives to (x0, x1, top, foot)
+
+
+def test_target_box_is_ignored():
+    x0, x1, top, foot = TARGET
+    res = ObstacleChecker(CFG).check(scene([TARGET]), ignore=(x0 - 0.02, top - 0.02, x1 + 0.02, foot + 0.02))
+    assert res.status == "clear"
+    assert (res.classes == 5).any() and not (res.classes == 4).any()   # drawn as "the target", not red
+
+
+def test_something_else_in_the_path_still_blocks_next_to_the_target():
+    x0, x1, top, foot = TARGET
+    other = (0.70, 0.85, 0.60, 0.95)     # a second thing in the path, beside the target's box
+    res = ObstacleChecker(CFG).check(scene([TARGET, other]), ignore=(x0 - 0.02, top - 0.02, x1 + 0.02, foot + 0.02))
+    assert res.status == "warning"
+
+
+def test_target_box_from_pixels_with_margin():
+    from robodog.cli.goto import target_box
+    assert target_box((100, 50, 300, 250), 1000, 500, 0.03) == pytest.approx((0.07, 0.07, 0.33, 0.53))
+    assert target_box((0, 0, 1000, 500), 1000, 500, 0.03) == (0.0, 0.0, 1.0, 1.0)   # clamped to the picture

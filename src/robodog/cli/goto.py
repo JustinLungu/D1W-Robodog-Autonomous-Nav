@@ -25,6 +25,10 @@ distances, and drive with the teleop keys.
                on the object. Put the value in camera.latency_s
           SPACE  E-STOP (stop + lie down, latched)    Esc  lie down and quit
 
+With --obstacles, the obstacle check runs on the same camera: while something is in the robot's
+path (or the check isn't sure), FORWARD driving is blocked for go-to and the keys alike; go-to
+pauses (goal kept). Backward, turning and sideways still work.
+
 The window must have focus: clicking another window stops the robot.
 """
 
@@ -40,7 +44,7 @@ import numpy as np
 
 from ..camera_model import CameraModel, fit_camera
 from ..config import REPO_ROOT, load_config
-from ..goto import GoTo, GoToLimits, PoseHistory
+from ..goto import FINAL_STATES, GoTo, GoToLimits, PoseHistory
 from ..target import TargetFollower
 from ..safety import SafeDog, SafetyError
 from ..teleop import Teleop
@@ -49,7 +53,7 @@ from .teleop import key_maps
 
 RATE_HZ = 30
 VIEW_W = 960       # camera view width in the window
-PANEL_H = 195
+PANEL_H = 215   # room for the obstacle line (--obstacles)
 BG, FG, DIM = (24, 26, 30), (230, 230, 230), (120, 124, 132)
 GREEN, AMBER, RED, BLUE, CYAN = (80, 200, 120), (240, 180, 60), (235, 70, 70), (90, 160, 240), (80, 210, 230)
 GRID_M = (0.5, 1.0, 1.5, 2.0, 3.0)
@@ -76,6 +80,13 @@ def grid_polylines(model: CameraModel) -> list[tuple[float, list[tuple[float, fl
         if len(pts) >= 2:
             out.append((d, pts))
     return out
+
+
+def target_box(box, width: int, height: int, margin: float) -> tuple[float, float, float, float]:
+    """A tracked box in pixels -> (left, top, right, bottom) as fractions of the picture, grown by margin."""
+    x0, y0, x1, y1 = box
+    return (max(0.0, x0 / width - margin), max(0.0, y0 / height - margin),
+            min(1.0, x1 / width + margin), min(1.0, y1 / height + margin))
 
 
 class Frames:
@@ -134,6 +145,22 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
         from ..vision.trash import TrashWatcher, to_sighting
 
         watcher = TrashWatcher(frames.get_stamped, tracker, csrt_max_s=cfg.trash.csrt_max_s)
+    # Obstacle check (--obstacles): on the same camera stream. While it isn't sure the path is
+    # clear, SafeDog refuses forward driving, and go-to pauses (the goal is kept).
+    obstacle_watcher, guard = None, None
+    if args.obstacles:
+        if frames.reader is None:
+            raise SystemExit("--obstacles needs a live camera or a video (--camera), not --image or the drawn floor")
+        from ..teleop import ForwardGuard
+        from ..vision.obstacles import from_settings
+        from ..vision.watcher import ObstacleWatcher
+
+        print("loading the depth model for the obstacle check...")
+        obstacle_watcher = ObstacleWatcher(None, from_settings(cfg.obstacles), camera=frames.reader)
+        guard = ForwardGuard(obstacle_watcher)
+        dog.forward_guard = guard.blocked
+        print(f"obstacle check on ({obstacle_watcher.estimator.device}): FORWARD is blocked while something is "
+              "ahead or the check isn't sure; go-to pauses meanwhile")
     tele = Teleop(dog, log=print)
     hold_keys, click_keys = key_maps()
 
@@ -289,6 +316,12 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
                 watcher.select(follower.track_id)   # only the selected piece gets the CSRT fallback
                 if watcher.error:
                     message = watcher.error
+            if obstacle_watcher is not None:
+                # The selected piece is in the path on purpose: its box (+ margin) isn't an obstacle.
+                # Only while it's tracked (YOLO or CSRT); everything else in the path still blocks.
+                box = next((t.box for t in tracks if t.track_id == follower.track_id), None) \
+                    if follower.track_id is not None else None
+                obstacle_watcher.ignore(None if box is None else target_box(box, fw, fh, cfg.obstacles.target_margin))
             # Slow while going to a tracked piece, so the tracker keeps up; normal speed otherwise.
             limits.max_vx = min(base_max_vx, cfg.trash.follow_vx) if follower.track_id is not None else base_max_vx
             going = (g_held and not hand and drive_ok and tele.standing and dog.settled() and not dog.fault)
@@ -296,7 +329,10 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
                 # Our own position count only knows go-to's commands, not hand driving.
                 goto.clear()
                 message = "goal cleared: hand driving (odometry 'commanded' can't follow it). Click again"
-            step = goto.step(pose, going, dt)
+            blocked = guard.blocked() if guard is not None else None
+            if going and blocked and goto.goal is not None and step.state not in FINAL_STATES:
+                message = f"paused, FORWARD BLOCKED: {blocked}. Back off / turn by hand (S, A/D, Q/E)"
+            step = goto.step(pose, going and not blocked, dt)   # blocked: paused, goal kept
             if going and step.dist is not None and now >= next_log:  # (no goal: nothing to log; G does nothing)
                 next_log = now + 0.5
                 print(f"go-to [{step.state}] goal {step.dist:.2f} m from middle | commanded {goto.commanded_m:.2f} m, "
@@ -323,19 +359,22 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
                 frame, frame_t = new_frame, new_t
             seen_pose = history.at(frame_t - latency) or pose  # where the robot was when this picture was taken
             trash = None if watcher is None else (tracks, sightings, follower, trash_rate, now)
+            obstacle = guard.check() if guard is not None else None
             draw(screen, (big, mid, small), frame, scale, view_h, model, grid, goto, step, pose, seen_pose, tele,
-                 status, message, calibrating, last_click, drive_ok, fake, g_held, latency, trash)
+                 status, message, calibrating, last_click, drive_ok, fake, g_held, latency, trash, obstacle)
             clock.tick(RATE_HZ)
     finally:
         print("lying down and closing...")
         dog.close()
         if watcher is not None:
             watcher.close()
+        if obstacle_watcher is not None:
+            obstacle_watcher.close()
         pg.quit()
 
 
 def draw(screen, fonts, frame, scale, view_h, model, grid, goto, step, pose, seen_pose, tele, status, message,
-         calibrating, last_click, drive_ok, fake, g_held, latency, trash=None):
+         calibrating, last_click, drive_ok, fake, g_held, latency, trash=None, obstacle=None):
     import pygame as pg
 
     big, mid, small = fonts
@@ -441,6 +480,13 @@ def draw(screen, fonts, frame, scale, view_h, model, grid, goto, step, pose, see
         screen.blit(small.render(tl, True, tcol), (12, y))
         y += 20
     y += 4
+    if obstacle is not None:   # (level, text, checks per second) from the forward guard
+        level, text, fps = obstacle
+        if level == "clear":
+            screen.blit(small.render(f"path clear ({fps:.1f} checks/s)", True, GREEN), (12, y))
+        else:
+            screen.blit(small.render(f"FORWARD BLOCKED: {text}", True, RED if level == "warn" else AMBER), (12, y))
+        y += 20
     msg = tele.state().fault or message
     screen.blit(small.render(msg[:120], True, RED if tele.state().fault else AMBER), (12, y))
     y += 22
@@ -465,6 +511,9 @@ def main():
     ap.add_argument("--hfov", type=float, help="override camera.hfov_deg (e.g. 70 for a laptop webcam)")
     ap.add_argument("--trash", action="store_true",
                     help="detect + track trash (needs the vision extra): click a box to go to that piece")
+    ap.add_argument("--obstacles", action="store_true",
+                    help="obstacle check on the camera (needs the vision extra): FORWARD is blocked while "
+                         "something is in the robot's path or the check isn't sure; go-to pauses meanwhile")
     ap.add_argument("--posture", choices=["stand", "crawl"], default="stand",
                     help="camera height used for all distances: stand = camera.height_m, crawl = "
                          "camera.crawl_height_m. This does NOT change how the robot moves (default: stand)")

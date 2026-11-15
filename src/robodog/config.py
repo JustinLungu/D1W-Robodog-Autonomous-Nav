@@ -108,6 +108,7 @@ class ObstaclesConfig:
     vanish_x: float
     height_ratio: float
     warn_row: float
+    target_margin: float     # go-to's target box is ignored by the check, grown by this (fraction of the picture)
 
 
 @dataclass

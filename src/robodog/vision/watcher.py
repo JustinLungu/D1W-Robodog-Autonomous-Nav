@@ -22,19 +22,22 @@ from .obstacles import ObstacleChecker, ObstacleConfig, ObstacleResult
 
 
 class ObstacleWatcher:
-    def __init__(self, source: str, cfg: ObstacleConfig, model: str = "small", device: str = "auto",
-                 size: int | None = None, log=print):
+    def __init__(self, source: str | None, cfg: ObstacleConfig, model: str = "small", device: str = "auto",
+                 size: int | None = None, log=print, camera: LatestFrameReader | None = None):
         self.cfg = cfg
         self.log = log
         self.estimator = DepthEstimator(model, device, size)   # loads the model (a few seconds)
         self.checker = ObstacleChecker(cfg)
-        self.camera = LatestFrameReader(source)
+        # camera: share a reader that's already open (go-to's), instead of a second video stream.
+        self._own_camera = camera is None
+        self.camera = camera or LatestFrameReader(source)
         self._lock = threading.Lock()
         self._result: ObstacleResult | None = None
         self._frame = None         # the camera frame the result belongs to (for drawing it)
         self._stamp = 0.0          # arrival time of the frame the result belongs to
         self._fps = 0.0
         self.error: str | None = None
+        self._ignore = None        # box (fractions) left out of the check: go-to's target, see ignore()
         self._running = True
         self._thread = threading.Thread(target=self._run, name="obstacle-watcher", daemon=True)
         self._thread.start()
@@ -51,7 +54,7 @@ class ObstacleWatcher:
                     time.sleep(0.005)
                     continue
                 last_seq = seq
-                res = self.checker.check(self.estimator.predict(frame))
+                res = self.checker.check(self.estimator.predict(frame), self._ignore)
                 now = time.monotonic()
                 with self._lock:
                     self._result, self._stamp, self._frame = res, stamp, frame
@@ -68,6 +71,11 @@ class ObstacleWatcher:
             age = time.monotonic() - self._stamp if self._result is not None else float("inf")
             return self._result, age, self._fps
 
+    def ignore(self, box: tuple[float, float, float, float] | None):
+        """Leave this box (left, top, right, bottom as fractions of the picture) out of the check,
+        e.g. the trash piece go-to is driving to. None = check everything."""
+        self._ignore = box
+
     def view(self):
         """(analysed frame, its verdict), both None until the first check: to draw what was decided."""
         with self._lock:
@@ -76,7 +84,8 @@ class ObstacleWatcher:
     def close(self):
         self._running = False
         self._thread.join(timeout=5.0)
-        self.camera.close()
+        if self._own_camera:
+            self.camera.close()
 
     def __enter__(self):
         return self

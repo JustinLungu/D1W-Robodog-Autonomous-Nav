@@ -15,6 +15,8 @@ Rules
 
 from __future__ import annotations
 
+import threading
+import time
 from dataclasses import dataclass
 
 from .safety import MIN_VX, MIN_VY, MIN_YAW, SafeDog, SafetyError
@@ -174,9 +176,9 @@ class Teleop:
 
 
 class ObstacleBanner:
-    """Turns the obstacle watcher's verdicts into what the teleop window shows.
+    """Turns the obstacle watcher's verdicts into a level + text for the window.
 
-    It only INFORMS. Nothing here stops the robot.
+    By itself it only informs; ForwardGuard (below) uses it to block forward driving.
 
     - A warning is held for HOLD seconds after the last one, so a single missed frame
       doesn't make it flicker.
@@ -206,3 +208,34 @@ class ObstacleBanner:
         if now - self._last_warn <= self.HOLD:
             return "warn", self._last_text
         return "clear", "path clear"
+
+
+class ForwardGuard:
+    """Blocks FORWARD driving while the obstacle check isn't sure the path is clear.
+
+    Give `guard.blocked` to SafeDog (dog.forward_guard): every control tick SafeDog asks it, and
+    while it returns a reason, forward speed is 0 for teleop and go-to alike. Backward, sideways
+    and turning still work, to get away from the obstacle.
+
+    "Not sure" counts as blocked: an obstacle (held for ObstacleBanner.HOLD after the last
+    sighting), no picture yet, a picture older than ObstacleBanner.STALE, or a crashed check.
+    Thread-safe: SafeDog's loop and the window both call it.
+    """
+
+    def __init__(self, watcher, clock=time.monotonic):
+        self.watcher = watcher
+        self.clock = clock
+        self._banner = ObstacleBanner()
+        self._lock = threading.Lock()
+
+    def check(self) -> tuple[str, str, float]:
+        """(level, text, checks per second) right now, as ObstacleBanner gives them."""
+        with self._lock:
+            res, age, fps = self.watcher.latest()
+            level, text = self._banner.update(res, age, self.clock(), self.watcher.error)
+            return level, text, fps
+
+    def blocked(self) -> str | None:
+        """Why forward is blocked, or None when the path is clear."""
+        level, text, _ = self.check()
+        return None if level == "clear" else text
