@@ -15,9 +15,10 @@ from .config import Config
 MIN_VX, MIN_VY, MIN_YAW = 0.05, 0.1, 0.1
 
 # standUp() takes a few seconds, and the vendor says not to send other commands during the
-# transition. Their demo waits 3 s after standUp() before anything else, so we do the same:
-# the loop sends nothing, and set_velocity() is refused, until this much time has passed.
-STAND_SETTLE_S = 3.0
+# transition. Their demo waits 3 s after standUp(), but on our robot move() was still refused
+# ("transition to Move failed", 12295) 3.3-3.7 s after standUp(), so we wait 4 s: the loop sends
+# nothing, and set_velocity() is refused, until this much time has passed.
+STAND_SETTLE_S = 4.0
 
 # shakeHand() is a ~4 s trick. The vendor demo sends nothing for 4 s and then calls standUp()
 # again; we copy that exactly (then the usual STAND_SETTLE_S before motion is accepted).
@@ -43,6 +44,17 @@ LIE_DOWN_S = 3.0
 # Motion is refused during both changes (settled() is False). crawl()'s minimum forward speed
 # is 0.1 m/s (move(): 0.05), see the vendor docs section 1.7.
 MIN_CRAWL_VX = 0.1
+
+# How set_crawl(True) lowers the body (crawl.method). Our robot's remote has a crawl button
+# that lowers it straight away, standing still, but we don't know which SDK call that is.
+# Both start with standUp(): the library refuses crawl() AND attitudeControl() otherwise
+# ("must transition to 'standUp' first"), so lowering from lieDown()'s crouch can't work.
+#   "crawl":  standUp, crawl(0, 0, 0) for change_s (see above), then drive with crawl().
+#   "height": standUp, attitudeControl(0, 0, 0, -height_vel) every tick for change_s (vendor:
+#             "body height change while standing"), then drive with the normal move().
+# Leaving crawl is always: cancelCrawl() ("crawl" only), standUp(), STAND_SETTLE_S.
+CRAWL_METHODS = ("crawl", "height")
+CRAWL_LOG_S = 1.0    # while crawling: log body height and mode this often
 
 
 class SafetyError(RuntimeError):
@@ -75,6 +87,8 @@ class SafeDog:
         clock: Callable[[], float] = time.monotonic,
         log: Callable[[str], None] = print,
     ):
+        if cfg.crawl.method not in CRAWL_METHODS:
+            raise ValueError(f"crawl.method must be one of {CRAWL_METHODS}, got {cfg.crawl.method!r}")
         # `robot` is anything with the vendor's method names: the real HighLevel object,
         # or FakeHighLevel in tests and dry runs. SafeDog doesn't know or care which.
         self.robot = robot
@@ -115,6 +129,7 @@ class SafeDog:
         self._crawl_ok = False               # crawl() accepted at least once during "lower"
         self._crawl_rc = None                # first error code crawl() returned during "lower"
         self.crawl_error: str | None = None  # why the last crawl attempt was given up (for the UI)
+        self._next_crawl_log = 0.0           # when to log body height + mode next (while crawling)
         self._fault: str | None = None       # reason for a latched fault, or None if all is fine
         self._estopped = False               # True after estop(): robot is limp, never touch it again
         self._last_battery_check = -float("inf")  # forces a battery check on the first tick
@@ -299,19 +314,19 @@ class SafeDog:
                 raise SafetyError(f"still standing up: wait {STAND_SETTLE_S:.0f} s after stand() (see settled())")
             cap_vx, cap_vy, cap_yaw = self.speed_caps()   # crawl caps while crawling
             self._cmd = (
-                _shape(vx, cap_vx, MIN_CRAWL_VX if self._crawling else MIN_VX),
+                _shape(vx, cap_vx, MIN_CRAWL_VX if self._in_crawl_gait() else MIN_VX),
                 _shape(vy, cap_vy, MIN_VY),
                 _shape(yaw, cap_yaw, MIN_YAW),
             )
             self._cmd_time = self.clock()  # timestamp for the dead-man switch in tick()
 
     def set_crawl(self, on: bool):
-        """Switch to the crawl gait (on) or back to normal standing (off). Only while standing STILL.
+        """Lower the body and drive low (on), or back to normal standing (off). Only while standing STILL.
 
-        on:  standUp(), nothing for crawl.settle_s, crawl(0, 0, 0) for crawl.change_s, then the
-             loop drives with crawl() under the crawl caps. If the robot refuses every crawl(),
-             it goes back to standing and crawl_error says why.
-        off: cancelCrawl(), standUp(), nothing for STAND_SETTLE_S, then move() as usual.
+        on:  lower the body the crawl.method way (see CRAWL_METHODS), then the loop drives
+             under the crawl caps. If the robot refuses every lowering command, it goes back
+             to standing and crawl_error says why.
+        off: cancelCrawl() (crawl/lie), standUp(), nothing for STAND_SETTLE_S, then move() as usual.
         Motion is refused during the change (settled() is False).
         """
         with self._lock:
@@ -329,14 +344,19 @@ class SafeDog:
             z = self._body_z()
             if on:
                 self.crawl_error = None
-                self._check_rc("standUp", self.robot.standUp())   # crawl() needs the standUp state
                 self._crawl_target = True
+                self._next_crawl_log = now
+                # crawl() and attitudeControl() both need the standUp state.
+                self._check_rc("standUp", self.robot.standUp())
                 self._body_phase = "prep"
                 self._body_until = now + c.settle_s
-                self.log(f"crawl: standUp(), then crawl(0, 0, 0) for {c.change_s:.1f} s "
-                         f"(body height now {z})")
+                how = ("crawl(0, 0, 0)" if c.method == "crawl" else f"attitudeControl(0, 0, 0, -{c.height_vel})")
+                then = "crawl()" if c.method == "crawl" else "move()"
+                self.log(f"crawl [{c.method}]: standUp(), then {how} for {c.change_s:.1f} s, then drive with "
+                         f"{then} (body height now {z})")
             else:
-                self._stop_crawl_gait()
+                if self._in_crawl_gait():
+                    self._stop_crawl_gait()
                 self._check_rc("standUp", self.robot.standUp())
                 self._crawling = self._crawl_target = False
                 self._body_phase = "raise"
@@ -351,9 +371,17 @@ class SafeDog:
         except Exception:
             return "z=?"
 
+    def _start_lowering(self, now: float):
+        """Begin the "lower" phase: tick() sends the method's lowering command for crawl.change_s."""
+        self._body_phase = "lower"
+        self._crawl_ok, self._crawl_rc = False, None
+        self._body_until = self._settled_at = now + self.cfg.crawl.change_s
+
     def _in_crawl_gait(self) -> bool:
-        """True when the SDK is (or may be) in its crawl state: move() would be refused."""
-        return self._crawling or self._body_phase == "lower"
+        """True when the SDK is (or may be) in its crawl state: move() would be refused.
+        ("height" lowers the normal stance and keeps driving with move().)"""
+        lowered = self._crawling or self._body_phase == "lower"
+        return lowered and self.cfg.crawl.method != "height"
 
     def _stop_crawl_gait(self):
         """Leave the crawl state: zero speed with crawl(), then cancelCrawl(). Never raises."""
@@ -464,27 +492,34 @@ class SafeDog:
                     self._settled_at = now + STAND_SETTLE_S
                     return
                 if self._body_until is not None:
+                    method = self.cfg.crawl.method
+                    if self._body_phase == "lower" and now >= self._next_crawl_log:
+                        self._next_crawl_log = now + CRAWL_LOG_S
+                        self.log(f"lowering [{method}]: {self._body_z()}, robot mode {self.robot.getCurrentCtrlmode()}")
                     if self._body_phase == "lower":
-                        # Entering the crawl gait (the body goes down); also the keepalive meanwhile.
-                        rc = self.robot.crawl(0.0, 0.0, 0.0)
+                        # The body goes down; also the keepalive meanwhile.
+                        if method == "height":
+                            rc = self.robot.attitudeControl(0.0, 0.0, 0.0, -self.cfg.crawl.height_vel)
+                        else:
+                            rc = self.robot.crawl(0.0, 0.0, 0.0)
                         self.last_sent = (0.0, 0.0, 0.0)
                         if rc in (0, None):
                             self._crawl_ok = True
                         elif self._crawl_rc is None:
                             self._crawl_rc = rc
-                            self._check_rc("crawl", rc)    # log the first refusal only, not 30 a second
+                            self._check_rc("attitudeControl" if method == "height" else "crawl", rc)  # first refusal only
                     if now < self._body_until:
                         return  # "prep" / "raise": like a stand-up, send nothing meanwhile
                     if self._body_phase == "prep":
-                        self._body_phase = "lower"
-                        self._crawl_ok, self._crawl_rc = False, None
-                        self._body_until = self._settled_at = now + self.cfg.crawl.change_s
+                        self._start_lowering(now)
                         return
                     if self._body_phase == "lower" and not self._crawl_ok:
-                        # The robot refused every crawl(): back to normal standing.
-                        self.crawl_error = f"the robot refused crawl() (error code {self._crawl_rc}): standing tall again"
+                        # The robot refused every lowering command: back to normal standing.
+                        call = "attitudeControl()" if method == "height" else "crawl()"
+                        self.crawl_error = f"the robot refused {call} (error code {self._crawl_rc}): standing tall again"
                         self.log(f"warning: {self.crawl_error}")
-                        self._stop_crawl_gait()
+                        if self._in_crawl_gait():
+                            self._stop_crawl_gait()
                         self._check_rc("standUp", self.robot.standUp())
                         self._crawling = self._crawl_target = False
                         self._body_phase = "raise"
@@ -505,7 +540,11 @@ class SafeDog:
                 cmd = (0.0, 0.0, 0.0) if stale else self._cmd
                 # Sending every tick, even when it's (0,0,0), is also the keepalive:
                 # the robot lies down by itself after 3 s without commands.
-                if self._crawling:
+                if self._crawling and now >= self._next_crawl_log:
+                    self._next_crawl_log = now + CRAWL_LOG_S
+                    self.log(f"crawling [{self.cfg.crawl.method}]: {self._body_z()}, robot mode "
+                             f"{self.robot.getCurrentCtrlmode()}, sending {cmd}")
+                if self._in_crawl_gait():
                     self._check_rc("crawl", self.robot.crawl(*cmd))   # move() is refused while crawling
                 else:
                     self._check_rc("move", self.robot.move(*cmd))

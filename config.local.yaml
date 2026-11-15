@@ -35,8 +35,16 @@ camera:
 # standUp(), wait settle_s, then crawl(0, 0, 0) for change_s while the body goes down; after
 # that it drives with crawl() under these slower caps. X again: cancelCrawl() + standUp().
 crawl:
-  settle_s: 2.0        # pause after standUp() before the first crawl() (the SDK needs the standUp state)
-  change_s: 2.0        # seconds of crawl(0, 0, 0) while the body goes down (no driving meanwhile)
+  # How X lowers the body (the remote's crawl button does it straight away, standing still; we
+  # don't know which SDK call that is, so try both and keep the one that works). Both start with
+  # standUp(): the SDK refuses crawl() and attitudeControl() in any other state.
+  #   "crawl":  crawl(0, 0, 0) for change_s, then drive with crawl()
+  #   "height": attitudeControl(0, 0, 0, -height_vel) for change_s, then drive with move()
+  # While lowering and crawling, the terminal prints the body height (z) and mode once a second.
+  method: "crawl"
+  settle_s: 2.0        # pause after standUp() before lowering (the SDK needs the standUp state)
+  change_s: 2.0        # seconds the body takes to go down (no driving meanwhile)
+  height_vel: 0.1      # "height": lowering speed in m/s (2 s x 0.1 = 0.2 m, about half the standing height)
   max_vx: 0.15         # m/s while crawling (safety.max_vx still caps it)
   max_vy: 0.10         # m/s sideways while crawling
   max_yaw: 0.30        # rad/s while crawling

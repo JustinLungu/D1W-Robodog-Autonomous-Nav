@@ -76,9 +76,11 @@ class CameraConfig:
 
 @dataclass
 class CrawlConfig:
-    """Crawl = the SDK's low crawl gait (SafeDog.set_crawl)."""
-    settle_s: float          # pause after standUp() before the first crawl()
-    change_s: float          # seconds of crawl(0, 0, 0) while the body goes down
+    """Crawl = driving with the body low (SafeDog.set_crawl)."""
+    method: str              # how the body goes down: "crawl" or "height" (see safety.py, CRAWL_METHODS)
+    settle_s: float          # pause after standUp() before lowering
+    change_s: float          # seconds the body takes to go down (no driving meanwhile)
+    height_vel: float        # "height": lowering speed for attitudeControl, m/s (vendor max 0.5)
     max_vx: float            # speed caps while crawling (the safety caps still apply on top)
     max_vy: float
     max_yaw: float

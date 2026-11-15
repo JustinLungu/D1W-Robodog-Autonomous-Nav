@@ -354,12 +354,12 @@ def test_error_warning_says_mode_and_time_since_last_posture_command():
     logs = []
     dog, robot, clock = make()
     dog.log = logs.append
-    stand(dog, clock)                       # standUp, then 3 s
+    stand(dog, clock)                       # standUp, then STAND_SETTLE_S
     clock.advance(0.05)
     robot.move = lambda *a: 12295           # robot refuses move()
     dog.tick()
     warning = [m for m in logs if "12295" in m][-1]
-    assert "robot mode 1" in warning and "3.05 s after standUp" in warning
+    assert "robot mode 1" in warning and f"{STAND_SETTLE_S + 0.05:.2f} s after standUp" in warning
 
 
 # ---------------------------------------------------------------- crawl (the SDK's crawl gait)
@@ -509,3 +509,68 @@ def test_no_handshake_while_crawling():
     enter_crawl(dog, robot, clock)
     with pytest.raises(SafetyError, match="stand tall"):
         dog.shake_hand()
+
+
+# ---------------------------------------------------------------- crawl.method: other ways to lower the body
+def lowered(method):
+    """Settled dog, X pressed with this crawl.method, standUp pause and lowering finished."""
+    dog, robot, clock = settled_dog()
+    dog.cfg.crawl.method = method
+    c = dog.cfg.crawl
+    dog.set_crawl(True)
+    assert robot.calls[-1][0] == "standUp"                  # both methods need the standUp state
+    clock.advance(c.settle_s + 0.01)
+    dog.tick()                                              # prep over -> lower
+    dog.tick()
+    clock.advance(c.change_s + 0.01)
+    dog.tick()                                              # lower over -> crawling
+    return dog, robot, clock
+
+
+def test_crawl_method_height_lowers_with_attitude_control_then_drives_with_move():
+    dog, robot, clock = lowered("height")
+    att = [c[1:] for c in robot.calls_named("attitudeControl")]
+    assert att and all(a == (0.0, 0.0, 0.0, -dog.cfg.crawl.height_vel) for a in att)
+    assert dog.crawling and dog.settled() and dog.crawl_error is None
+    n_crawls = len(crawls(robot))
+    dog.set_velocity(0.07)                                   # move()'s minimum applies, not crawl()'s
+    dog.tick()
+    assert moves(robot)[-1] == (0.07, 0.0, 0.0) and len(crawls(robot)) == n_crawls
+    dog.set_velocity(0.0)
+    dog.tick()
+    dog.set_crawl(False)
+    assert robot.calls_named("cancelCrawl") == [] and robot.calls[-1][0] == "standUp"
+
+
+def test_crawl_method_height_refused_goes_back_to_standing():
+    dog, robot, clock = settled_dog()
+    robot.attitudeControl = lambda *a: (robot._record("attitudeControl", *map(float, a)), 12295)[1]
+    dog.cfg.crawl.method = "height"
+    dog.set_crawl(True)
+    clock.advance(dog.cfg.crawl.settle_s + 0.01)
+    dog.tick()
+    dog.tick()
+    clock.advance(dog.cfg.crawl.change_s + 0.01)
+    dog.tick()
+    assert not dog.crawling and "attitudeControl()" in dog.crawl_error and "12295" in dog.crawl_error
+
+
+def test_lowering_and_crawling_log_body_height_and_mode():
+    dog, robot, clock = settled_dog()
+    logs = []
+    dog.log = logs.append
+    c = dog.cfg.crawl
+    dog.set_crawl(True)
+    clock.advance(c.settle_s + 0.01)
+    for _ in range(int((c.change_s + 1.5) * 30)):            # lowering, then 1.5 s crawling, at 30 Hz
+        dog.tick()
+        clock.advance(1 / 30)
+    assert any(m.startswith("lowering [crawl]") and "z=" in m and "robot mode" in m for m in logs)
+    assert any(m.startswith("crawling [crawl]") and "z=" in m and "robot mode" in m for m in logs)
+
+
+def test_unknown_crawl_method_rejected():
+    cfg = pinned_config()
+    cfg.crawl.method = "lie"
+    with pytest.raises(ValueError, match="crawl.method"):
+        SafeDog(FakeHighLevel(), cfg)

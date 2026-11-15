@@ -95,7 +95,7 @@ class Teleop:
                 self.message = "standing up..."
                 self.dog.stand()
                 self.standing = True
-                self.message = "standing up... (keys ignored for 3 s)"
+                self.message = "standing up... (keys ignored for 4 s)"
             elif name == "crawl":
                 if not self.standing:
                     self.message = "stand up first (R), then X to crawl"
@@ -106,7 +106,7 @@ class Teleop:
                 on = not self.dog.crawling
                 self.dog.set_crawl(on)   # refused (message below) while standing up / moving
                 self.message = ("lowering the body... (keys ignored ~4 s)" if on
-                                else "raising the body... (keys ignored ~3 s)")
+                                else "raising the body... (keys ignored ~4 s)")
             elif name == "shake_hand":
                 if not self.standing:
                     return
