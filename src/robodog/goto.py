@@ -96,6 +96,26 @@ class GoTo:
         self.needed_m = max(0.0, dist - max(self.lim.arrive_m, self.lim.stop_before_m))
         return None
 
+    def refine_goal(self, local_x: float, local_y: float, pose: tuple[float, float, float], blend: float = 1.0):
+        """Move the goal to a fresh measurement of where the target is, WITHOUT restarting the drive.
+
+        Used while the camera still sees the target (trash tracking): each new detection
+        corrects the goal, so errors in the first click and odometry drift don't add up.
+        (local_x, local_y) is the target relative to the robot's middle at `pose`, which
+        should be the pose the robot had when that camera frame was taken.
+        blend < 1 mixes the new measurement with the old goal (smooths detector jitter).
+        Does nothing without a goal or after the drive has ended.
+        """
+        if self.goal is None or self.state in FINAL_STATES:
+            return
+        x, y, yaw = self.nav_pose(pose)
+        gx = x + local_x * math.cos(yaw) - local_y * math.sin(yaw)
+        gy = y + local_x * math.sin(yaw) + local_y * math.cos(yaw)
+        self.goal = (self.goal[0] + blend * (gx - self.goal[0]), self.goal[1] + blend * (gy - self.goal[1]))
+        # Keep the overshoot guard meaningful: what we've driven so far + what's still needed now.
+        dist = math.hypot(*self.relative(pose))
+        self.needed_m = self.commanded_m + max(0.0, dist - max(self.lim.arrive_m, self.lim.stop_before_m))
+
     def clear(self):
         self.goal = None
         self.state = "no goal"

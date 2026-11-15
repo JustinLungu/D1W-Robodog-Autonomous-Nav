@@ -4,12 +4,19 @@
     uv run robodog-goto --allow-motion         # real robot: R stand, click a goal, HOLD G to go
     uv run robodog-goto --fake                 # fake robot + drawn floor: try everything with no robot
     uv run robodog-goto --fake --camera 0 --lens pinhole --hfov 70   # fake robot, laptop webcam
+    uv run robodog-goto --allow-motion --trash                 # also detect + track trash: click a BOX to go to it
+    uv run robodog-goto --allow-motion --trash --posture crawl # the same with the camera at crawl height
+
+With --trash (needs the vision extra) the tracked pieces are boxed. Click a box and hold G:
+the goal stays locked on that piece while the camera sees it (every detection corrects it),
+and when it leaves the view the robot finishes on odometry, like a plain clicked goal.
 
 Driving to a goal needs `measured: true` in the camera section of config.local.yaml (the camera's
 height / offset measured and its pitch calibrated with K). Until then you can still click to see
 distances, and drive with the teleop keys.
 
   MOUSE   click the floor        set the goal (shown as a ring; red = refused)
+          click a trash box      (--trash) go to that piece, tracking it while it's in view
   HOLD    G                      go to the goal. Let go = stop (the goal is kept)
   HOLD    W/S A/D Q/E (arrows)   drive by hand, like robodog-teleop (overrides G)
   CLICK   R stand   F lie down   C clear goal   1/2/3 speed (hand driving)
@@ -32,6 +39,7 @@ import numpy as np
 from ..camera_model import CameraModel, fit_camera
 from ..config import REPO_ROOT, load_config
 from ..goto import GoTo, GoToLimits
+from ..target import PoseHistory, TargetFollower
 from ..safety import SafeDog, SafetyError
 from ..teleop import Teleop
 from .status import MODES
@@ -39,7 +47,7 @@ from .teleop import key_maps
 
 RATE_HZ = 30
 VIEW_W = 960       # camera view width in the window
-PANEL_H = 170
+PANEL_H = 195
 BG, FG, DIM = (24, 26, 30), (230, 230, 230), (120, 124, 132)
 GREEN, AMBER, RED, BLUE, CYAN = (80, 200, 120), (240, 180, 60), (235, 70, 70), (90, 160, 240), (80, 210, 230)
 GRID_M = (0.5, 1.0, 1.5, 2.0, 3.0)
@@ -74,6 +82,7 @@ class Frames:
     def __init__(self, source: str | None, image: str | None):
         self.reader = None
         self.still = None
+        self._still_stamp = time.monotonic()
         if image:
             self.still = cv2.imread(image)
             if self.still is None:
@@ -90,17 +99,20 @@ class Frames:
                 raise SystemExit(f"{e} (laptop on the robot's Wi-Fi? try `ping 192.168.234.1`)")
 
     def get(self) -> np.ndarray | None:
+        return self.get_stamped()[0]
+
+    def get_stamped(self) -> tuple[np.ndarray | None, float, int]:
+        """(frame, time it arrived (time.monotonic), sequence number). A still image never changes."""
         if self.still is not None:
-            return self.still
-        frame, _, _ = self.reader.get()
-        return frame
+            return self.still, self._still_stamp, 1
+        return self.reader.get()
 
     def close(self):
         if self.reader:
             self.reader.close()
 
 
-def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool):
+def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
     import pygame as pg
 
     cam_cfg = cfg.camera
@@ -109,7 +121,17 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool):
                         min(cfg.goto.max_yaw, cfg.safety.max_yaw), cfg.goto.arrive_m, cfg.goto.timeout_s,
                         cfg.goto.stop_before_m, cfg.goto.odometry)
     goto = GoTo(limits)
-    print(f"go-to odometry: {limits.odometry}")
+    print(f"go-to odometry: {limits.odometry}; posture: {args.posture}")
+    base_max_vx = limits.max_vx
+    # Trash tracking (--trash): a detector thread on the camera, and the goal locked onto one piece.
+    watcher = None
+    follower = TargetFollower(goto, cfg.trash.lost_after_s, cfg.trash.reacquire_m)
+    history = PoseHistory()
+    tracks, sightings, trash_seq, trash_rate = [], [], 0, 0.0
+    if tracker is not None:
+        from ..vision.trash import TrashWatcher, to_sighting
+
+        watcher = TrashWatcher(frames.get_stamped, tracker)
     tele = Teleop(dog, log=print)
     hold_keys, click_keys = key_maps()
 
@@ -124,8 +146,11 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool):
     fh, fw = frame.shape[:2]
     lens, hfov, pitch = args.lens or cam_cfg.lens, args.hfov or cam_cfg.hfov_deg, cam_cfg.pitch_deg
 
+    # The lens is lower in the crawl posture: every distance depends on this height.
+    cam_height = cam_cfg.height_m if args.posture == "stand" else cam_cfg.crawl_height_m
+
     def make_model():
-        return CameraModel(fw, fh, hfov, cam_cfg.height_m, pitch, cam_cfg.forward_offset_m, lens)
+        return CameraModel(fw, fh, hfov, cam_height, pitch, cam_cfg.forward_offset_m, lens)
 
     model = make_model()
     grid = grid_polylines(model)
@@ -143,6 +168,8 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool):
     calibrating = False
     calib_clicks: list[tuple[float, float, float]] = []  # (u, v, distance) while calibrating
     message = "R to stand, then click the floor to set a goal, hold G to go"
+    if watcher is not None:
+        message = "R to stand, then click a trash BOX (or the floor) to set a goal, hold G to go"
     if not drive_ok:
         message = "camera not measured yet: click to see distances (G disabled). See README §6.7"
     status, next_status = {}, 0.0
@@ -163,6 +190,7 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool):
                         tele.action(click_keys[ev.key])
                     elif ev.key == pg.K_c:
                         goto.clear()
+                        follower.drop()
                         message = "goal cleared"
                     elif ev.key == pg.K_k:
                         calibrating, calib_clicks = not calibrating, []
@@ -193,6 +221,22 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool):
                         print(f"worst error {fit.worst_error:.0%}. Put these in the camera section of config.local.yaml:")
                         print(f'  lens: "{lens}"\n  hfov_deg: {hfov}\n  pitch_deg: {pitch}\n')
                         continue
+                    # A click inside a trash box picks that piece (the smallest box, if they overlap).
+                    hit = [(t, sg) for t, sg in zip(tracks, sightings)
+                           if t.box[0] <= u <= t.box[2] and t.box[1] <= v <= t.box[3]]
+                    if hit:
+                        t, sg = min(hit, key=lambda e: (e[0].box[2] - e[0].box[0]) * (e[0].box[3] - e[0].box[1]))
+                        if not drive_ok:
+                            message = f"#{t.track_id} {t.label}: camera not measured, can't go there"
+                            continue
+                        err = follower.select(sg, pose, time.monotonic())
+                        if err:
+                            message = f"#{t.track_id} {t.label}: {err}"
+                        else:
+                            from_cam = math.hypot(sg.floor[0] - model.forward_offset_m, sg.floor[1])
+                            message = f"target #{t.track_id} {t.label}, {from_cam:.2f} m from under the camera. Hold G to go"
+                        continue
+                    follower.drop()   # a plain floor click: an ordinary, fixed goal
                     pt = model.pixel_to_floor(u, v)
                     if pt is None:
                         message = "that's not the floor (at or above the horizon)"
@@ -220,13 +264,27 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool):
 
             now = time.monotonic()
             dt, last = now - last, now
+            history.add(now, pose)
+            if watcher is not None:
+                new_tracks, stamp, seq, trash_rate = watcher.latest()
+                if seq != trash_seq:   # a new detector result: place the boxes on the floor, correct the goal
+                    trash_seq, tracks = seq, new_tracks
+                    sightings = [to_sighting(t, model) for t in tracks]
+                    # The frame is old by the time it's analysed: use the pose the robot had back then.
+                    pose_then = history.at(stamp - cfg.trash.camera_delay_s) or pose
+                    follower.update(sightings, pose_then, now)
+                follower.tick(now)
+                if watcher.error:
+                    message = watcher.error
+            # Slow while going to a tracked piece, so the tracker keeps up; normal speed otherwise.
+            limits.max_vx = min(base_max_vx, cfg.trash.follow_vx) if follower.track_id is not None else base_max_vx
             going = (g_held and not hand and drive_ok and tele.standing and dog.settled() and not dog.fault)
             if hand and goto.goal is not None and goto.lim.odometry == "commanded":
                 # Our own position count only knows go-to's commands, not hand driving.
                 goto.clear()
                 message = "goal cleared: hand driving (odometry 'commanded' can't follow it). Click again"
             step = goto.step(pose, going, dt)
-            if going and now >= next_log:  # what we commanded vs what the robot's estimate says
+            if going and step.dist is not None and now >= next_log:  # (no goal: nothing to log; G does nothing)
                 next_log = now + 0.5
                 print(f"go-to [{step.state}] goal {step.dist:.2f} m from middle | commanded {goto.commanded_m:.2f} m, "
                       f"robot estimate {goto.robot_m:.2f} m, needed {goto.needed_m:.2f} m | pose x {pose[0]:+.2f} "
@@ -247,17 +305,20 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool):
                 except Exception:
                     status = {}
 
+            trash = None if watcher is None else (tracks, sightings, follower, trash_rate, now)
             draw(screen, (big, mid, small), frames.get(), scale, view_h, model, grid, goto, step, pose, tele,
-                 status, message, calibrating, last_click, drive_ok, fake, g_held)
+                 status, message, calibrating, last_click, drive_ok, fake, g_held, trash)
             clock.tick(RATE_HZ)
     finally:
         print("lying down and closing...")
         dog.close()
+        if watcher is not None:
+            watcher.close()
         pg.quit()
 
 
 def draw(screen, fonts, frame, scale, view_h, model, grid, goto, step, pose, tele, status, message,
-         calibrating, last_click, drive_ok, fake, g_held):
+         calibrating, last_click, drive_ok, fake, g_held, trash=None):
     import pygame as pg
 
     big, mid, small = fonts
@@ -280,6 +341,24 @@ def draw(screen, fonts, frame, scale, view_h, model, grid, goto, step, pose, tel
 
     if last_click and not goto.goal:
         pg.draw.circle(screen, AMBER, sp(last_click[:2]), 6, 2)
+
+    # Tracked trash: a box per piece with its ID, class, confidence and distance.
+    if trash is not None:
+        tracks, sightings, follower, _, _ = trash
+        for t, sg in zip(tracks, sightings):
+            mine = t.track_id == follower.track_id
+            col = GREEN if mine else CYAN
+            x0, y0 = sp(t.box[:2])
+            x1, y1 = sp(t.box[2:])
+            pg.draw.rect(screen, col, (x0, y0, max(1, x1 - x0), max(1, y1 - y0)), 3 if mine else 1)
+            if sg.floor is None:
+                dist = "not on floor"
+            elif sg.clipped:
+                dist = "cut off"
+            else:
+                dist = f"{math.hypot(sg.floor[0] - model.forward_offset_m, sg.floor[1]):.2f} m"
+            lab = small.render(f"#{t.track_id} {t.label} {t.conf:.2f}  {dist}", True, (0, 0, 0), col)
+            screen.blit(lab, (x0, y0 - lab.get_height() if y0 > lab.get_height() else y1))
 
     # The goal, re-projected from the robot's position estimate every frame. If it slides off
     # the real spot while driving, the geometry or the odometry is off.
@@ -325,13 +404,28 @@ def draw(screen, fonts, frame, scale, view_h, model, grid, goto, step, pose, tel
         if step.state == "paused" and not g_held:
             g += "   hold G to go"
     else:
-        g = "no goal: click the floor"
+        g = "no goal: click the floor" + (" or a trash box" if trash is not None else "")
     screen.blit(mid.render(g, True, FG), (12, y))
-    y += 26
+    y += 22
+    if trash is not None:
+        tracks, _, follower, rate, now = trash
+        if follower.track_id is None:
+            tl, tcol = f"trash: {len(tracks)} tracked ({rate:.1f} checks/s). Click a box to go to it", DIM
+        elif follower.state == "tracking":
+            tl = (f"target #{follower.track_id} {follower.label} {follower.conf:.2f}: TRACKING, goal corrected "
+                  f"{follower.updates}x ({rate:.1f} checks/s)")
+            tcol = GREEN
+        else:
+            tl = (f"target #{follower.track_id} {follower.label}: OUT OF VIEW for {now - follower.last_seen:.1f} s, "
+                  f"finishing on odometry (corrected {follower.updates}x before)")
+            tcol = AMBER
+        screen.blit(small.render(tl, True, tcol), (12, y))
+        y += 20
+    y += 4
     msg = tele.state().fault or message
     screen.blit(small.render(msg[:120], True, RED if tele.state().fault else AMBER), (12, y))
     y += 22
-    for h in ("CLICK floor = goal   HOLD G = go   HOLD WASD/QE = hand drive   R stand  F lie  C clear  K calibrate",
+    for h in ("CLICK floor/box = goal   HOLD G = go   HOLD WASD/QE = hand drive   R stand  F lie  C clear  K calibrate",
               "SPACE e-stop   Esc quit   (window must have focus)"):
         screen.blit(small.render(h, True, DIM), (12, y))
         y += 18
@@ -350,6 +444,11 @@ def main():
     ap.add_argument("--image", help="use a still image as the camera")
     ap.add_argument("--lens", choices=["fisheye", "pinhole"], help="override camera.lens (e.g. pinhole for a webcam)")
     ap.add_argument("--hfov", type=float, help="override camera.hfov_deg (e.g. 70 for a laptop webcam)")
+    ap.add_argument("--trash", action="store_true",
+                    help="detect + track trash (needs the vision extra): click a box to go to that piece")
+    ap.add_argument("--posture", choices=["stand", "crawl"], default="stand",
+                    help="camera height used for all distances: stand = camera.height_m, crawl = "
+                         "camera.crawl_height_m. This does NOT change how the robot moves (default: stand)")
     ap.add_argument("--calib-distances", default="1.5,2.5,3.0",
                     help="K calibration: distances of the objects you'll click, in click order, measured ON THE "
                          "FLOOR from the point under the camera lens (default 1.5,2.5,3.0). One distance fits only "
@@ -362,6 +461,13 @@ def main():
         raise SystemExit("robodog-goto needs pygame: run `uv sync` first")
 
     cfg = load_config(args.config)
+    tracker = None
+    if args.trash:   # load the model first: a missing extra or model should fail before we touch the robot
+        from ..vision.trash import TrashTracker
+
+        print("loading the trash model...")
+        tracker = TrashTracker(cfg.trash.model, cfg.trash.conf, cfg.trash.imgsz, classes=cfg.trash.classes)
+        print(f"trash model {tracker.weights.name} on {tracker.device}, input {tracker.imgsz}px")
     if args.fake:
         sys.path.insert(0, str(REPO_ROOT / "tests"))
         from fake_robot import FakeHighLevel
@@ -389,7 +495,7 @@ def main():
 
     frames = Frames(source, args.image)
     try:
-        run(dog, cfg, frames, args, args.fake)
+        run(dog, cfg, frames, args, args.fake, tracker)
     except KeyboardInterrupt:
         print("\nCtrl+C")
         dog.close()
