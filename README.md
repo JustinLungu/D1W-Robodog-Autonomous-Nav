@@ -364,6 +364,8 @@ Rough speed of the `small` model (default input: 308 px on CPU, 518 px on GPU):
 
 > If `uv run pytest` fails with `No module named 'lark'`, your shell has ROS sourced, and pytest is loading ROS's plugin. Run `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run pytest` instead.
 
+> **A plain `uv sync` removes the vision extra** (torch, transformers). Always sync with the extra: `uv sync --extra vision-cpu` (or `vision-gpu`).
+
 ### 6.7 Go to a clicked goal (`robodog-goto`)
 Click a spot on the floor in the robot's camera view; **hold G** and the robot drives there. Let go and it stops (the goal is kept). Everything goes through `SafeDog`, and all the teleop keys still work in the same window.
 
@@ -402,6 +404,96 @@ R, click inside the cyan arcs, hold G: the ring moves as the simulated robot tur
 3. **Calibrate:** put objects at **1.5, 2.5 and 3.0 m** (measured on the floor from the point **under the camera lens**; one can be off to the side). Press **K** and click each object's base in that order. It fits the **tilt, field of view and lens type together** (one point can only fix the tilt, and AgiBot's lens spec turned out not to match our camera) and applies them right away: check the cyan arcs against the objects. The terminal prints `lens`, `hfov_deg` and `pitch_deg`; put them in `config.local.yaml`. Our camera looks **up** (negative pitch), so the floor is only visible from ~1–1.5 m ahead.
 4. **Check:** bottles at 1, 2 and 2.5 m, click each: the shown distance should be within ~10 %. Then set `camera.measured: true`. **G only drives once that's true.**
 5. **Drive:** `uv run --extra vision-gpu robodog-goto --allow-motion` (motion on in `config.machine.yaml`). R, click a spot 1 m ahead, hold G.
+
+
+### 6.8 Litter detection on recordings (offline, experimental)
+Finds litter on the floor in a recorded video and draws boxes around it. It uses [Grounding DINO](https://huggingface.co/IDEA-Research/grounding-dino-tiny), a *zero-shot* detector: you describe what to look for in words, no training needed. Needs the vision extra (§6.6). The first run downloads the model (~700 MB).
+
+```bash
+uv run robodog-litter recordings/<run>/video.mkv                       # whole video
+uv run robodog-litter recordings/<run>/video.mkv --start 20 --end 40   # try settings on a short piece first
+uv run robodog-litter recordings/<run>/video.mkv --show                # watch it while it runs
+uv run robodog-litter recordings/<run>/video.mkv --classes "piece of paper, can, plastic bottle"
+```
+Results go to `recordings/<run>/litter/`: `annotated.mp4` (the analysed frames with boxes) and `detections.csv` (video time, laptop time, class, score, box). Use the laptop time to match detections with `commands.csv` from the same run.
+
+Tuned for the robot's low camera:
+- **Floor only.** Only the lower half of the image is searched (`--search-from 0.5`), and a box must end below the dashed line (`--min-bottom 0.65`). This skips bottles and cups on tables.
+- **Small things only.** Boxes bigger than 3 % of the frame are dropped (`--max-area 0.03`); big hits were sleeping bags, jackets and mats.
+- **Prompt wording matters.** "piece of paper" found the floor scraps far better than "paper". Too many boxes: raise `--threshold` (default 0.25). Missing things: lower it.
+
+Speed: ~5–8 s per frame on a laptop CPU, so it analyses 1 frame per second of video by default (an 87 s video takes ~8–10 min). On a GPU it's well under 1 s per frame, and the default becomes 5 frames per second.
+
+This is a starting point, not a final detector. The next step is to fix and confirm its boxes on our own frames, then train a small, fast detector (YOLO) on them that can run live.
+
+### 6.9 Obstacle warning from the camera (experimental, warning only)
+Warns when something is in the robot's path, using only the RGB camera and Depth Anything (§6.6). **It shows a message. It does not stop the robot**, and it is not a safety feature: the person with the remote still is.
+
+```bash
+uv run robodog-obstacles                                        # live view: see what it detects, tune it
+uv run robodog-obstacles --source recordings/<run>/video.mkv    # the same on a recording
+uv run robodog-teleop --allow-motion --obstacles                # the warning inside the teleop window
+```
+In teleop a red **OBSTACLE AHEAD** bar appears. With `--record`, the start and end of each warning go into `commands.csv` (`obstacle_warn near=…`, `obstacle_clear`). If the camera picture is older than 1.5 s the window says so instead of claiming the path is clear.
+
+**How it decides** ([obstacles.py](src/robodog/vision/obstacles.py)):
+1. Depth Anything only gives *relative* depth, and the floor right in front is the nearest thing in the picture. So each frame it fits a flat **floor plane** through the floor pixels. That cancels the model's unknown scale and offset, and the robot's pitching.
+2. Whatever is clearly **closer than the floor would be at that spot** sticks up from the floor: an obstacle.
+3. Its depth says which floor row it stands on, i.e. how far away it is. It counts only if it's inside the **robot-sized window at that distance**: between the path's left and right edge, and no higher than the robot (the robot drives under a table top, but not through its legs).
+   The **yellow box** is that window at the warning line, and it's a hard limit: anything left of, right of or above it is ignored, so what you see in the viewer is exactly what decides. Its bottom stays open: below it means nearer than the warning line.
+4. It warns if such a thing stands **on or before the warning line** (`warn_row`).
+5. If no floor is visible at all, something is covering it: reported as **BLOCKED**, which also warns.
+
+**Settings** are in the `obstacles:` section of [config.local.yaml](config.local.yaml), calibrated for the robot **standing** (see below). Every setting can be tried from the command line first, e.g. `--warn-row 0.98`:
+
+| Setting | Meaning | Standing value |
+|---|---|---|
+| `path_left`, `path_right` | Where the robot's path (wheel edges + margin) leaves the picture at the bottom | 0.34, 0.64 |
+| `vanish_x` | Where the robot's centre line meets the horizon | 0.488 |
+| `height_ratio` | Robot top (+ margin) above the camera, relative to the camera's height above the floor. Higher things are driven under | 0.37 |
+| `warn_row` | Warning distance as an image row; bigger = closer, above 1.0 = closer than the nearest visible floor | 1.06 = 0.8 m |
+
+**Calibration** (2026-11-15, from three app screenshots in `recordings/calibration_screenshots1/`: a measuring tape laid from just in front of the right wheel, 4.3 m straight ahead, parallel to a floor line through the robot's middle):
+- **Lens:** the vendor spec gives HFOV 122°, VFOV 70° (and DFOV 122°), which only fits a fisheye ("equidistant") lens: ~626 px focal length at 1334 px wide.
+- **Fitted per posture** from where the two lines meet (the horizon) and where the 4.3 m tape end appears:
+
+| | Camera height | Tilt | Nearest visible floor | Tape (wheel edge) from centre |
+|---|---|---|---|---|
+| Standing | 40 cm | 12° up | 0.93 m | 20 cm |
+| Crawling | 23 cm | 12° up | 0.55 m | 19 cm |
+| Lying | 17 cm | 15° up | 0.47 m | 19 cm |
+
+  The wheel edge comes out at 19–20 cm in every posture, matching the vendor's 360 mm robot width, which supports the model. The camera is **centred** on the robot.
+- **Margins:** 10 cm beside each wheel, 10 cm above the robot (top 42 cm, vendor spec). Each setting is the most cautious value over 0.45–3 m distance and floor-to-roof height, because the checker uses straight path edges while the fisheye bends them.
+- **Warning distance 0.8 m from the camera:** about 1 s of camera + processing delay at up to 0.6 m/s, plus a little braking. Other distances (standing): 0.88 = 1.5 m, 0.93 = 1.2 m, 0.98 = 1.0 m, 1.06 = 0.8 m, 1.11 = 0.7 m, 1.19 = 0.6 m.
+- **Other postures** need other values (the config file lists them); there is no automatic switching yet. Crawling's height is an estimate.
+- **Uncertainty:** where exactly the tape starts relative to the camera isn't known; ±15 cm there changes the camera height by ±1.5 cm. The screenshots are from the vendor app, assumed to show the full 16:9 camera frame like the RTSP stream; check once that the yellow box looks the same in `robodog-obstacles`.
+
+**Speed:** ~0.35 s per check on a laptop CPU (2–3 per second), plus the camera's own delay of ~0.3–0.5 s. At 0.3 m/s the robot travels 20–25 cm before a warning can appear. A GPU makes the checks several times faster.
+
+**Should the frame be cropped before Depth Anything?** No. Measured on 13 frames against a larger reference model:
+
+| Depth computed on | Time (CPU) | Depth error in the path area | Correct verdicts |
+|---|---|---|---|
+| **Full frame, 308 px, cut afterwards (used)** | 0.32 s | 3.6 % | 13 / 13 |
+| Cropped first, 308 px | 0.52 s | 2.5 % | 13 / 13 |
+| Cropped first, 252 px | 0.35 s | 2.9 % | 13 / 13 |
+| Cropped first, 196 px | 0.23 s | 3.9 % | 11 / 13 |
+| Full frame, 196 px | 0.18 s | 6.0 % | 12 / 13 |
+
+Cropping isn't faster (the model scales by the short side, so a wide crop has *more* pixels), and although the depth inside the crop is slightly sharper, objects at medium distance come out too close once the ceiling and far walls are gone, which leads to false warnings. So the "cut" happens after the depth step, as the robot-path window described above.
+
+**Known limits:** glass, mirrors, very thin things (chair legs, cables) and low flat things can be missed; a floor that isn't flat (ramps, steps, thick mats) confuses the floor fit. With `--record` and `--obstacles` together the camera stream is opened twice (2 × ~5 Mbit/s).
+
+### 6.10 The robot's own person detection (just for a look)
+The robot already runs a person detector on its NPU (`detection_2d_node`, YOLO11n, classes person and car). It's meant for a "follow me" feature and nothing in our code uses it. This shows its boxes on the live camera, by **listening** to its ROS 2 topic `/perception/detection2d` from the laptop: nothing is sent to the robot, nothing runs on it, no ROS install needed.
+
+```bash
+uv sync --extra vision-cpu --extra robot-bus   # once (list every extra you use, or uv sync removes it)
+uv run robodog-persons                         # window: camera + the robot's boxes
+uv run robodog-persons --headless              # print the boxes instead
+```
+Each box shows the robot's track number (one person keeps it across frames) and the confidence. The class name is always empty: the vendor doesn't fill it in. It runs at 10 Hz and misses people quite often. How it connects: [robotbus.py](src/robodog/robotbus.py).
 
 ---
 

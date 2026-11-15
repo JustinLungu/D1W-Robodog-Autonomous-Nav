@@ -42,3 +42,29 @@ goto:
   odometry: "robot"        # where go-to thinks the robot is: "robot" = its own estimate (getPosition),
                            # "commanded" = our count (speed x time along the IMU heading). Try "commanded"
                            # if it overshoots once the goal is out of view (see TESTING.md test 18)
+
+# Camera-based obstacle WARNING (robodog-obstacles, robodog-teleop --obstacles).
+# It only warns; it never stops the robot. All values are fractions of the camera image:
+# x: 0 = left edge, 1 = right edge.  rows: 0 = top, 1 = bottom.
+# See them on the live picture with `uv run robodog-obstacles`.
+#
+# Calibrated for the robot STANDING (README §6.9, "Calibration"), with margins of 10 cm
+# beside each wheel and 10 cm above the robot. Measured camera: 40 cm above the floor,
+# tilted 12 deg up, centred on the robot; fisheye lens (HFOV 122 deg, VFOV 70 deg).
+# It sees no floor closer than 0.93 m; nearer obstacles are judged by their depth alone.
+#
+# Other postures need other values (the camera is lower). Derived the same way:
+#              path_left  path_right  vanish_x  height_ratio  warn_row (0.8 m)
+#   standing      0.34       0.64       0.488       0.37          1.06
+#   crawling      0.25       0.75       0.496       0.64 (est.)   0.90
+#   lying         0.18       0.76       0.482       0.46          0.89
+obstacles:
+  # Where the robot's path (wheel edges + 10 cm) leaves the picture at the bottom.
+  path_left: 0.34
+  path_right: 0.64
+  vanish_x: 0.488      # where the robot's centre line meets the horizon (measured; the camera is centred)
+  height_ratio: 0.37   # (robot top + 10 cm above the camera) / (camera above the floor): 52 cm. Higher things are driven under
+  # Warning distance, as an image row (bigger = closer). For the robot standing:
+  #   0.88 = 1.5 m   0.93 = 1.2 m   0.98 = 1.0 m   1.06 = 0.8 m   1.11 = 0.7 m   1.19 = 0.6 m   (from the camera)
+  # 0.8 m: ~1 s of camera + processing delay at up to 0.6 m/s, plus a little braking.
+  warn_row: 1.06

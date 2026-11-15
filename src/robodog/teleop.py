@@ -171,3 +171,38 @@ class Teleop:
     def state(self) -> TeleopState:
         return TeleopState(self.standing, self.level, frozenset(self.held),
                            tuple(self._cur), self.message, self.dog.fault)
+
+
+class ObstacleBanner:
+    """Turns the obstacle watcher's verdicts into what the teleop window shows.
+
+    It only INFORMS. Nothing here stops the robot.
+
+    - A warning is held for HOLD seconds after the last one, so a single missed frame
+      doesn't make it flicker.
+    - A verdict older than STALE seconds is not trusted: the window says so instead
+      of showing "clear" for a picture that is no longer true.
+    """
+
+    HOLD = 1.0
+    STALE = 1.5
+
+    def __init__(self):
+        self._last_warn = -float("inf")
+        self._last_text = ""
+
+    def update(self, res, age: float, now: float, error: str | None = None) -> tuple[str, str]:
+        """(level, text). level: 'warn', 'clear', 'stale' or 'starting'."""
+        if error:
+            return "stale", f"obstacle check stopped: {error}"
+        if res is None:
+            return "starting", "obstacle check: waiting for the first picture..."
+        if age > self.STALE:
+            return "stale", f"obstacle check: no fresh picture ({age:.1f} s old)"
+        if res.warn:
+            self._last_warn = now
+            what = "view blocked, something very close" if res.status == "blocked" else "collision soon"
+            self._last_text = f"OBSTACLE AHEAD: {what}"
+        if now - self._last_warn <= self.HOLD:
+            return "warn", self._last_text
+        return "clear", "path clear"
