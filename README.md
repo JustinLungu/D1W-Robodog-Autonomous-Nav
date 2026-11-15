@@ -317,6 +317,22 @@ Each run gets its own folder (git-ignored):
 
 To match them: laptop time of a video frame = `video_start_unix` + the frame's time in `video.mkv`. Compare that with `t_unix` in the CSV. That's when the frame *arrived* on the laptop; the camera's own delay (~0.2–0.5 s) is not subtracted. The window shows `● REC mm:ss`, or `REC: VIDEO STOPPED` if the camera stream dropped (see `ffmpeg.log` in the folder; the commands keep being recorded). Use `--camera /dev/video0` to record a webcam instead, e.g. with `--fake`.
 
+### 6.4c Keyboard driving over the app protocol (`robodog-app-teleop`, for crawling)
+The SDK can't put the robot into its real low crawl (the firmware forces every SDK command into `RL_GaitWalk`, see "Crawling" in 6.11). `robodog-app-teleop` drives the robot the way the vendor's phone app / remote does instead: UDP JSON to the robot's `dog_task` (heartbeat + stick messages 20x a second, stand / crawl / dump commands), and it reads the robot's own state stream. It doesn't use the SDK or SafeDog at all.
+
+```bash
+uv run robodog-app-teleop --fake            # try the controls without a robot
+uv run robodog-app-teleop --allow-motion    # real robot. NO SDK program may run at the same time
+```
+Keys as in `robodog-teleop`: hold W/S/A/D/Q/E to drive, **R** stand (app stand, ~5 s), **X** crawl / stand tall (only while standing still), **F** lie down, **1/2/3** speed level, **SPACE** e-stop (dump, latched), **Esc** lie down and quit.
+
+Safety, as far as this path allows:
+- **Same caps** as teleop: `safety.max_*` standing, `crawl.max_*` while crawling, levels 33 / 66 / 100 %. Release = sticks to zero at once; starts are ramped. Clicking away from the window stops it.
+- **Sticks to zero** while a posture change runs, when the robot's state stream is older than 1 s, and after an e-stop. No stick is ever deflected more than `--max-stick` (0.35).
+- **The stick scale is unknown.** It's computed with the largest values in the robot's speed config (full stick = 1.0 m/s forward, 3.0 m/s sideways, 2.0 rad/s), so the robot should move at or *below* the asked speed. The window shows **asked** and **measured** (the robot's own `v_body` / yaw rate). Once you know the real scale, pass `--full-scale vx,vy,yaw`.
+- **Which stick axis is which is a guess** (forward = left stick y, sideways = left stick x, turn = right stick x). To check, with the robot standing and plenty of room: hold **5 / 6 / 7 / 8** to send a tiny +0.05 on stick axis 0 / 1 / 2 / 3 and watch "measured". Fix `AXES` / `FULL_SCALE` in [src/robodog/app_remote.py](src/robodog/app_remote.py) if needed.
+- **Not protected like SafeDog:** if this program dies without its last messages, the robot only stops if `dog_task` treats the missing stream as "no input" (likely, untested). Keep the remote in hand.
+
 ### 6.5 Results on our robot
 | Check | Result |
 |---|---|
@@ -550,6 +566,8 @@ The terminal (`[safedog] ...`) logs the body height before and after each switch
 **What did not work, and why** (so nobody tries it again):
 - **SDK `crawl()`** starts a *tall* stepping gait (`RL_GaitWalk` in the controller log), not the low crawl. It also needs an extra `standUp()` first (otherwise "robot is runing, can't transition to crawl"), and while it's active `move()` is refused.
 - **SDK `attitudeControl(height_vel)`** lowers the body briefly, but the next `move()` stands it straight back up.
+
+> **Status 2026-11-15 (tested on the robot): X in teleop/goto does NOT work yet, and the reason is known.** The app commands only work while **no SDK client is connected**: while our program has the SDK open (`initRobot`), `dog_task` ignores the app's stand/crawl. Worse, **connecting the SDK while the robot is crawling makes it drop to lying immediately** (`emergency`, body 0.25 -> 0.14 m). Crawl via the app protocol works reliably when nothing else is connected: send heartbeats plus a zero-stick `{"type":"remote",...}` message about every 50 ms, then stand (122), then crawl (106). Stand tall (122) and dump (90) work the same way. So crawling needs a teleop that talks *only* the app protocol (driving with the remote's stick messages); that is the next step.
 
 **If X doesn't go low** (the window says "the body didn't go down"), check these two things, both seen on our robot (2026-11-15):
 - **Stand before crawl.** `dog_task` only turns 106 into crawl (`control_mode 0x12, motion_mode 0x11`) after an app stand (122). When the robot was stood up through the SDK instead, it turned 106 into a lie-down (`control_mode 0x33`, which the controller ignored). That's why our code always sends 122 first.
