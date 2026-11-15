@@ -20,13 +20,18 @@ robodog-stand-test = "robodog.cli.stand_test:main"
 robodog-teleop = "robodog.cli.teleop:main"
 robodog-goto = "robodog.cli.goto:main"
 robodog-depth = "robodog.cli.depth:main"
+robodog-litter = "robodog.cli.litter:main"
+robodog-obstacles = "robodog.cli.obstacles:main"
+robodog-persons = "robodog.cli.persons:main"
 
 # Computer vision extras. Pick ONE (they pull different PyTorch builds):
 #   uv sync --extra vision-cpu    # laptop without an NVIDIA GPU (small CPU-only PyTorch)
 #   uv sync --extra vision-gpu    # laptop with an NVIDIA GPU (CUDA PyTorch, ~3 GB download)
 [project.optional-dependencies]
-vision-cpu = ["torch>=2.4", "transformers>=4.56"]
-vision-gpu = ["torch>=2.4", "transformers>=4.56"]
+vision-cpu = ["torch>=2.4", "transformers>=4.56", "pillow>=10"]
+vision-gpu = ["torch>=2.4", "transformers>=4.56", "pillow>=10"]
+# Listen to the robot's own ROS 2 topics (robotbus.py). Pinned to the robot's Zenoh version.
+robot-bus = ["eclipse-zenoh==1.6.2"]
 
 [dependency-groups]
 dev = ["pytest>=8"]

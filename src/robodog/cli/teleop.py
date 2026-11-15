@@ -4,6 +4,9 @@
     uv run robodog-teleop --fake            # fake robot: try the controls with no robot
     uv run robodog-teleop --allow-motion --record --note "hallway, chair legs"
                                             # also record camera video + commands (see recorder.py)
+    uv run robodog-teleop --allow-motion --obstacles
+                                            # also WARN about obstacles ahead (camera + Depth Anything).
+                                            # It only shows a message; it does NOT stop the robot.
 
 Needs allow_motion: true in config.machine.yaml AND --allow-motion (not for --fake).
 
@@ -30,12 +33,12 @@ import time
 from ..config import REPO_ROOT, load_config
 from ..recorder import Recorder
 from ..safety import SafeDog, SafetyError
-from ..teleop import Teleop
+from ..teleop import ObstacleBanner, Teleop
 from .status import MODES
 
 RATE_HZ = 30
 
-W, H = 560, 380
+W, H = 560, 430
 BG, FG, DIM = (24, 26, 30), (230, 230, 230), (120, 124, 132)
 GREEN, AMBER, RED, BLUE = (80, 200, 120), (240, 180, 60), (235, 70, 70), (90, 160, 240)
 
@@ -59,7 +62,7 @@ def key_maps():
     return hold, click
 
 
-def draw(screen, fonts, st, status, fake, rec=None):
+def draw(screen, fonts, st, status, fake, rec=None, obstacle=None):
     import pygame as pg
 
     big, mid, small = fonts
@@ -104,12 +107,24 @@ def draw(screen, fonts, st, status, fake, rec=None):
     for h in help_lines:
         screen.blit(small.render(h, True, DIM), (20, y)); y += 22
 
+    if obstacle is not None:   # (level, text, checks per second) from the obstacle watcher
+        level, text, fps = obstacle
+        y += 8
+        if level == "warn":
+            pg.draw.rect(screen, RED, (12, y, W - 24, 40), border_radius=6)
+            surf = mid.render(text, True, (255, 255, 255))
+            screen.blit(surf, ((W - surf.get_width()) // 2, y + 8))
+        else:
+            col = GREEN if level == "clear" else AMBER
+            extra = f"   ({fps:.1f} checks/s, warning only)" if level == "clear" else ""
+            screen.blit(small.render(text + extra, True, col), (20, y + 10))
+
     if not pg.key.get_focused():
         screen.blit(mid.render("click this window to control", True, AMBER), (20, H - 36))
     pg.display.flip()
 
 
-def run(dog: SafeDog, fake: bool, rec: Recorder | None = None):
+def run(dog: SafeDog, fake: bool, rec: Recorder | None = None, watcher=None):
     import pygame as pg
 
     pg.init()
@@ -125,6 +140,7 @@ def run(dog: SafeDog, fake: bool, rec: Recorder | None = None):
     clock = pg.time.Clock()
     last = time.monotonic()
     last_fault = None
+    banner, last_level = ObstacleBanner(), None
     try:
         while not tele.quit:
             for ev in pg.event.get():
@@ -166,7 +182,17 @@ def run(dog: SafeDog, fake: bool, rec: Recorder | None = None):
                         battery=status.get("battery"), mode=status.get("mode"), fault=st.fault)
             last_fault = st.fault
 
-            draw(screen, fonts, st, status, fake, rec)
+            obstacle = None
+            if watcher is not None:
+                res, age, fps = watcher.latest()
+                level, text = banner.update(res, age, now, watcher.error)
+                obstacle = (level, text, fps)
+                if rec and level != last_level:   # mark in commands.csv when the warning starts and ends
+                    near = f" near={res.nearness:.2f}" if res is not None and level == "warn" else ""
+                    rec.event(f"obstacle_{level}{near}")
+                last_level = level
+
+            draw(screen, fonts, st, status, fake, rec, obstacle)
             clock.tick(RATE_HZ)
     finally:
         print("lying down and closing...")
@@ -181,8 +207,11 @@ def main():
     ap.add_argument("--fake", action="store_true", help="use the fake robot from tests/ (no robot, nothing moves)")
     ap.add_argument("--record", action="store_true", help="record camera video + commands to recordings/<date_time>/")
     ap.add_argument("--note", default="", help="free text saved with the recording (where, what you tested)")
-    ap.add_argument("--camera", help="camera to record (default: robot camera; with --fake: no video). "
-                                     "e.g. /dev/video0 for a webcam")
+    ap.add_argument("--camera", help="camera to record / watch (default: robot camera; with --fake: none). "
+                                     "e.g. /dev/video0 for a webcam, or a video file for --obstacles")
+    ap.add_argument("--obstacles", action="store_true",
+                    help="show a warning when something is in the robot's path (needs the vision extra). "
+                         "Warning only: it does not stop the robot")
     args = ap.parse_args()
 
     try:
@@ -222,12 +251,29 @@ def main():
         })
         print(f"recording to {rec.dir}" + ("" if camera else " (commands only, no video)"))
 
+    watcher = None
+    if args.obstacles:
+        source = args.camera or (None if args.fake else f"rtsp://{cfg.network.robot_ip}:8554/test")
+        if source is None:
+            raise SystemExit("--obstacles with --fake needs --camera (a webcam like /dev/video0, or a video file)")
+        from ..vision.obstacles import from_settings
+        from ..vision.watcher import ObstacleWatcher
+
+        print("loading the depth model for the obstacle warning...")
+        try:
+            watcher = ObstacleWatcher(source, from_settings(cfg.obstacles))
+        except RuntimeError as e:   # camera could not be opened
+            raise SystemExit(f"obstacle warning: {e}")
+        print(f"obstacle warning on ({watcher.estimator.device}). It only warns; it does NOT stop the robot.")
+
     print("window open: click it, then R to stand up. Esc to quit.")
     try:
-        run(dog, args.fake, rec)  # lies the robot down before returning
+        run(dog, args.fake, rec, watcher)  # lies the robot down before returning
     except KeyboardInterrupt:
         print("\nCtrl+C")
     finally:
+        if watcher:
+            watcher.close()
         if rec:
             rec.stop()  # after run(), so the video also shows the robot lying down
 

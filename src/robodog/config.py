@@ -86,11 +86,22 @@ class GoToConfig:
 
 
 @dataclass
+class ObstaclesConfig:
+    """Camera-based obstacle warning (vision/obstacles.py explains each value)."""
+    path_left: float
+    path_right: float
+    vanish_x: float
+    height_ratio: float
+    warn_row: float
+
+
+@dataclass
 class Config:
     network: NetworkConfig
     safety: SafetyConfig
     camera: CameraConfig
     goto: GoToConfig
+    obstacles: ObstaclesConfig
     sdk_dir: Path  # from config.machine.yaml
 
 
@@ -168,7 +179,7 @@ def load_config(path: str | Path | None = None, machine_path: str | Path | None 
     raw = yaml.safe_load(path.read_text()) or {}
     machine = _load_machine(machine_path)
 
-    unknown = raw.keys() - {"network", "safety", "camera", "goto"}
+    unknown = raw.keys() - {"network", "safety", "camera", "goto", "obstacles"}
     misplaced = unknown & _MACHINE_KEYS.keys()
     misplaced |= {k for k in ("laptop_ip",) if isinstance(raw.get("network"), dict) and k in raw["network"]}
     misplaced |= {k for k in ("allow_motion",) if isinstance(raw.get("safety"), dict) and k in raw["safety"]}
@@ -191,5 +202,6 @@ def load_config(path: str | Path | None = None, machine_path: str | Path | None 
         safety=_build(SafetyConfig, {**safety, "allow_motion": machine["allow_motion"]}, "safety", path),
         camera=_build(CameraConfig, raw.get("camera"), "camera", path),
         goto=_build(GoToConfig, raw.get("goto"), "goto", path),
+        obstacles=_build(ObstaclesConfig, raw.get("obstacles"), "obstacles", path),
         sdk_dir=sdk_dir,
     )
