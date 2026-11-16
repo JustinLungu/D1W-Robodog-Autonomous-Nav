@@ -25,16 +25,18 @@ import socket
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from .app_link import APP_PORT, CMD_CRAWL, CMD_DUMP, CMD_STAND
 
 STATE_PORT = 8080          # dog_task sends its state stream to the app's address, this port
 STREAM_HZ = 20             # heartbeat + stick messages per second (the real app: ~10-20)
 
-# Our speed (vx, vy, yaw) -> stick axes. (axis index in "joystick", sign). A GUESS for
-# [left x, left y, right x, right y]: forward = left stick up, sideways = left stick x,
-# turn = right stick x. Check with the probe keys and fix here if the robot moves differently.
-AXES = {"vx": (1, +1), "vy": (0, -1), "yaw": (2, -1)}
+# Our speed (vx, vy, yaw) -> stick axes: (axis index in "joystick", sign). Tested on the robot
+# (2026-11-16, +0.05 on each axis): axis 0 + = sideways RIGHT, axis 1 + = BACKWARD, axis 2 = turn
+# (A/D turned the right way), axis 3 = nothing. So forward = -axis 1, left = -axis 0.
+# Calibration (C key) measures signs + scales and overrides these (see CALIBRATION_FILE).
+AXES = {"vx": (1, -1), "vy": (0, -1), "yaw": (2, -1)}
 
 # Speed at full stick deflection (1.0), per axis. Unknown, so we assume the LARGEST values in
 # the robot's dog_task speed config (x_speed_max 1.0, y_speed_max 3.0, yaw_speed_max 2.0):
@@ -44,6 +46,27 @@ FULL_SCALE = {"vx": 1.0, "vy": 3.0, "yaw": 2.0}
 
 # Never deflect a stick further than this, whatever the speed asked (extra safety net).
 MAX_STICK = 0.35
+
+# Written by the C-key calibration in robodog-app-teleop, read at start: {"axes": ..., "full_scale": ...}
+CALIBRATION_FILE = Path(__file__).resolve().parents[2] / "app_teleop_calibration.json"
+
+
+def load_calibration(path=CALIBRATION_FILE):
+    """(axes, full_scale) from the calibration file, or the defaults above if there is none."""
+    try:
+        d = json.loads(Path(path).read_text())
+        axes = {k: (int(v[0]), int(v[1])) for k, v in d["axes"].items()}
+        scale = {k: float(v) for k, v in d["full_scale"].items()}
+        if set(axes) == set(scale) == {"vx", "vy", "yaw"} and min(scale.values()) > 0:
+            return axes, scale
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return dict(AXES), dict(FULL_SCALE)
+
+
+def save_calibration(axes, full_scale, path=CALIBRATION_FILE, note=""):
+    Path(path).write_text(json.dumps({"axes": {k: list(v) for k, v in axes.items()},
+                                      "full_scale": full_scale, "note": note}, indent=2) + "\n")
 
 STATE_STALE_S = 1.0        # no state from the robot for this long -> sticks to zero
 

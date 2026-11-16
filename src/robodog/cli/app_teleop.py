@@ -16,10 +16,10 @@ then ignores these commands, and connecting the SDK while crawling makes it fold
   Q / E       sideways left / right   SPACE  E-STOP (dump, latched)
                                       Esc    lie down and quit
 
-  CALIBRATE (hold, robot standing, lots of room): 5 6 7 8 = send a tiny raw stick value
-  (+0.05) on stick axis 0 / 1 / 2 / 3 and watch the "measured" line: which axis moves the
-  robot which way, and how fast. Then fix AXES / FULL_SCALE in src/robodog/app_remote.py
-  (or pass --full-scale).
+  CALIBRATE (robot standing still, ~1 m of room in front, behind and to the sides): press C.
+  It drives forward, sideways and turns, each with stick 0.2 for 1.5 s, measures the robot's own
+  speed and saves the stick directions + speeds to app_teleop_calibration.json (used from then
+  on). Any key aborts. Probe keys (hold): 5 6 7 8 = +0.05 on stick axis 0 / 1 / 2 / 3.
 
 Speeds stay under the caps in config.local.yaml (safety.max_*, and crawl.max_* while
 crawling). The stick scale is NOT known yet, so it assumes the largest one in the robot's
@@ -31,7 +31,8 @@ from __future__ import annotations
 import argparse
 import time
 
-from ..app_remote import AXES, FULL_SCALE, MAX_STICK, AppRemote, FakeAppRemote
+from ..app_remote import (AXES, CALIBRATION_FILE, FULL_SCALE, MAX_STICK, AppRemote, FakeAppRemote,
+                          load_calibration, save_calibration)
 from ..config import load_config
 from .teleop import AMBER, BG, BLUE, DIM, FG, GREEN, RED
 
@@ -49,7 +50,7 @@ def keys():
     }
     probe = {pg.K_5: 0, pg.K_6: 1, pg.K_7: 2, pg.K_8: 3}
     click = {
-        pg.K_r: "stand", pg.K_x: "crawl", pg.K_f: "lie_down",
+        pg.K_r: "stand", pg.K_x: "crawl", pg.K_f: "lie_down", pg.K_c: "calibrate",
         pg.K_1: "speed_1", pg.K_2: "speed_2", pg.K_3: "speed_3",
         pg.K_SPACE: "estop", pg.K_ESCAPE: "quit",
     }
@@ -91,8 +92,11 @@ def draw(screen, fonts, tele, remote, fake):
     for text, c in lines:
         screen.blit(mid.render(text, True, c), (20, y)); y += 30
     screen.blit(small.render(st.message[:84], True, RED if st.estopped else AMBER), (20, y + 4)); y += 36
+    full = tele.full_scale
+    screen.blit(small.render(f"stick scale (full stick): vx {full['vx']:.2f}  vy {full['vy']:.2f}  yaw {full['yaw']:.2f}"
+                             f"   axes {tele.axes['vx']} {tele.axes['vy']} {tele.axes['yaw']}", True, DIM), (20, y)); y += 24
     for h in ("HOLD  W/S fwd/back   A/D turn   Q/E sideways   5-8 probe stick axis 0-3",
-              "CLICK R stand  X crawl/tall  F lie  1/2/3 speed  SPACE e-stop  Esc quit"):
+              "CLICK R stand  X crawl/tall  F lie  C calibrate  1/2/3 speed  SPACE e-stop  Esc quit"):
         screen.blit(small.render(h, True, DIM), (20, y)); y += 22
     if not pg.key.get_focused():
         screen.blit(mid.render("click this window to control", True, AMBER), (20, H - 36))
@@ -154,7 +158,8 @@ def main():
     from ..app_teleop import AppTeleop
 
     cfg = load_config(args.config)
-    full_scale = dict(FULL_SCALE)
+    axes, full_scale = load_calibration()
+    print("stick calibration:", f"from {CALIBRATION_FILE.name}" if CALIBRATION_FILE.exists() else "defaults (press C to calibrate)")
     if args.full_scale:
         vals = [float(v) for v in args.full_scale.split(",")]
         if len(vals) != 3 or min(vals) <= 0:
@@ -163,7 +168,7 @@ def main():
     max_stick = max(0.0, min(1.0, args.max_stick))
 
     if args.fake:
-        remote = FakeAppRemote(AXES, full_scale)
+        remote = FakeAppRemote(axes, full_scale)
     else:
         if not (args.allow_motion and cfg.safety.allow_motion):
             raise SystemExit("motion needs BOTH allow_motion: true in config.machine.yaml AND --allow-motion")
@@ -171,7 +176,10 @@ def main():
             raise SystemExit("this laptop isn't on the robot's network: join its Wi-Fi")
         print("NOTE: no SDK program (robodog-teleop / goto / status) may run at the same time.")
         remote = AppRemote(cfg.network.robot_ip, cfg.network.laptop_ip)
-    tele = AppTeleop(remote, cfg, AXES, full_scale, max_stick)
+    tele = AppTeleop(remote, cfg, axes, full_scale, max_stick)
+    if not args.fake:
+        tele.on_calibrated = lambda ax, sc, note: (save_calibration(ax, sc, note=note),
+                                                   print(f"saved {CALIBRATION_FILE}"))
     print(f"stick full scale {full_scale}, max stick {max_stick}. Window open: click it, R to stand up.")
     try:
         run(tele, remote, args.fake)

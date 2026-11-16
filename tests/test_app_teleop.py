@@ -150,3 +150,48 @@ def _free_port():
     p = s.getsockname()[1]
     s.close()
     return p
+
+
+def test_calibration_finds_signs_and_scales():
+    """The fake robot's real stick mapping differs from the defaults: C must measure it."""
+    from robodog.app_teleop import CAL_PAUSE_S, CAL_RUN_S
+    true_axes = {"vx": (1, -1), "vy": (0, -1), "yaw": (2, +1)}
+    true_scale = {"vx": 0.8, "vy": 0.5, "yaw": 1.2}
+    cfg = pinned_config()
+    remote = FakeAppRemote(axes=true_axes, full_scale=true_scale)
+    tele = AppTeleop(remote, cfg, axes={"vx": (1, +1), "vy": (0, +1), "yaw": (2, -1)},
+                     full_scale={"vx": 1.0, "vy": 3.0, "yaw": 2.0}, log=lambda m: None)
+    saved = []
+    tele.on_calibrated = lambda ax, sc, note: saved.append((ax, sc))
+    t = standing(tele, remote)
+    tele.action("calibrate", t)
+    assert tele.cal is not None
+    t = run(tele, remote, set(), 3 * (CAL_RUN_S + CAL_PAUSE_S) + 0.5, t)
+    assert tele.cal is None and saved
+    assert tele.axes == true_axes
+    for k in true_scale:
+        assert tele.full_scale[k] == pytest.approx(true_scale[k], rel=0.05)
+    assert remote.sticks == [0, 0, 0, 0]
+    # afterwards W really goes forward at the asked speed
+    tele.action("speed_1", t)
+    t = run(tele, remote, {"forward"}, 2.0, t)
+    assert remote.state.v_body[0] == pytest.approx(tele.state().cmd[0], rel=0.05) and tele.state().cmd[0] > 0
+
+
+def test_calibration_aborts_on_any_key():
+    tele, remote, _ = make()
+    t = standing(tele, remote)
+    tele.action("calibrate", t)
+    t = run(tele, remote, set(), 0.5, t)
+    assert any(remote.sticks)
+    run(tele, remote, {"forward"}, 1 / 30, t)
+    assert tele.cal is None and remote.sticks == [0, 0, 0, 0] and "aborted" in tele.message
+
+
+def test_calibration_file_roundtrip(tmp_path):
+    from robodog.app_remote import load_calibration, save_calibration
+    f = tmp_path / "cal.json"
+    assert load_calibration(f) == (AXES, FULL_SCALE)          # no file: defaults
+    save_calibration({"vx": (1, -1), "vy": (0, -1), "yaw": (2, 1)}, {"vx": 0.8, "vy": 0.5, "yaw": 1.2}, f)
+    axes, scale = load_calibration(f)
+    assert axes["yaw"] == (2, 1) and scale["vx"] == 0.8
