@@ -10,8 +10,8 @@
                                             # is ahead (or the check isn't sure), FORWARD is blocked;
                                             # backward, turning and sideways still work.
     uv run robodog-teleop --allow-motion --obstacles --people
-                                            # also: a PERSON in the red (close, in the path) area
-                                            # stops ALL motion until they've gone
+                                            # also: a PERSON in the path, closer than people.warn_row
+                                            # (magenta line), stops ALL motion until they've gone
 
 Needs allow_motion: true in config.machine.yaml AND --allow-motion (not for --fake).
 
@@ -69,7 +69,7 @@ def key_maps():
     return hold, click
 
 
-def camera_view(watcher, ocfg):
+def camera_view(watcher, ocfg, people_row=None):
     """The analysed camera frame with the obstacle marks (path lines, yellow box, red/orange...),
     scaled to the window width, as a pygame surface; None until the first check."""
     import cv2
@@ -80,7 +80,7 @@ def camera_view(watcher, ocfg):
     frame, res = watcher.view()
     if frame is None or res is None:
         return None
-    img = cv2.resize(draw_overlay(frame, res, ocfg), (W, VIEW_H), interpolation=cv2.INTER_AREA)
+    img = cv2.resize(draw_overlay(frame, res, ocfg, people_row), (W, VIEW_H), interpolation=cv2.INTER_AREA)
     return pg.surfarray.make_surface(cv2.cvtColor(img, cv2.COLOR_BGR2RGB).swapaxes(0, 1))
 
 
@@ -232,7 +232,7 @@ def run(dog: SafeDog, fake: bool, rec: Recorder | None = None, watcher=None, ocf
                     rec.event(f"obstacle_{level}{near}")
                 last_level = level
                 if res is not view_res:   # a new check: redraw the picture (not 30 times a second)
-                    view, view_res = camera_view(watcher, ocfg), res
+                    view, view_res = camera_view(watcher, ocfg, people.warn_row if people else None), res
 
             person, seen = None, []
             if people is not None:
@@ -343,10 +343,10 @@ def main():
         print("loading the person model...")
         detector = PersonDetector(p.model, p.conf, p.imgsz)
         person_watcher = PersonWatcher(camera.get, detector, lambda w, h: camera_for(cfg.camera, w, h))
-        people = PersonGuard(person_watcher, watcher, p.margin, p.overlap, p.clear_s)
+        people = PersonGuard(person_watcher, watcher, p.warn_row, p.margin, p.overlap, p.clear_s)
         dog.stop_guard = people.stop_reason   # SafeDog sends 0 for EVERY speed while this says stop
-        print(f"person check on ({detector.device}): a person in the obstacle check's red area stops ALL "
-              f"motion until that hasn't been the case for {p.clear_s:.1f} s")
+        print(f"person check on ({detector.device}): a person in the path closer than people.warn_row "
+              f"({p.warn_row}) stops ALL motion until that hasn't been the case for {p.clear_s:.1f} s")
         print(f"obstacle check on ({watcher.estimator.device}): FORWARD is blocked while something is ahead "
               "or the check isn't sure. Backward, turning and sideways still work.")
 

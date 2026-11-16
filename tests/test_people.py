@@ -38,12 +38,15 @@ class FakeWatcher:
 
 
 class FakeObstacles:
-    """Obstacle check result: red (mask) in the right half of the picture's lower part."""
-    def __init__(self, age=0.1, error=None, red=True):
-        mask = np.zeros((72, 128), bool)
+    """Obstacle check result: in the path = right half of the picture's lower part, standing on
+    row `foot` (bigger = closer)."""
+    def __init__(self, age=0.1, error=None, red=True, foot=0.95, status="warning"):
+        in_path = np.zeros((72, 128), bool)
         if red:
-            mask[40:72, 64:128] = True
-        self.res = type("R", (), {"mask": mask})()
+            in_path[40:72, 64:128] = True
+        self.res = type("R", (), {"status": status, "in_path": in_path,
+                                  "foot": np.full((72, 128), foot, np.float32),
+                                  "mask": in_path & (foot >= 0.9)})()   # objects' red at warn_row 0.9
         self.age, self.error = age, error
 
     def latest(self):
@@ -63,9 +66,9 @@ BESIDE = Person((100, 300, 300, 700), 0.9, 1.2)         # same distance, but lef
 FAR = Person((900, 100, 950, 350), 0.9, 4.0)            # above the red area (far away)
 
 
-def guard(people, obstacles=None, clock=None):
-    return PersonGuard(FakeWatcher(people), obstacles or FakeObstacles(), margin=0.02, overlap=0.02,
-                       clear_s=1.5, clock=clock or Clock())
+def guard(people, obstacles=None, clock=None, warn_row=0.9):
+    return PersonGuard(FakeWatcher(people), obstacles or FakeObstacles(), warn_row=warn_row, margin=0.02,
+                       overlap=0.02, clear_s=1.5, clock=clock or Clock())
 
 
 def test_person_in_the_red_area_stops_everything_then_waits_after_leaving():
@@ -90,6 +93,19 @@ def test_margin_catches_a_box_just_next_to_the_red_area():
     assert guard([just_left]).stop_reason() == "PERSON in the way"
 
 
+def test_people_have_their_own_warning_line():
+    between = FakeObstacles(foot=0.87)          # beyond the objects' line (0.9), before the people's (0.86)
+    assert guard([IN_RED], between, warn_row=0.86).stop_reason() == "PERSON in the way"
+    assert guard([IN_RED], between, warn_row=0.9).stop_reason() is None
+    assert between.res.mask.sum() == 0           # ...where a box would not be red yet
+
+
+def test_no_floor_visible_counts_for_people_too():
+    blocked = FakeObstacles(foot=0.0, status="blocked")
+    blocked.res.mask = np.ones((72, 128), bool)  # "blocked": the covered floor is the mask
+    assert guard([BESIDE], blocked).stop_reason() == "PERSON in the way"
+
+
 @pytest.mark.parametrize("watcher,obstacles", [
     (FakeWatcher(None), FakeObstacles()),                       # no picture yet
     (FakeWatcher([], age=3.0), FakeObstacles()),                # old picture (person check)
@@ -98,7 +114,7 @@ def test_margin_catches_a_box_just_next_to_the_red_area():
     (FakeWatcher([]), FakeObstacles(error="obstacle watcher stopped: boom")),
 ])
 def test_guard_stops_when_not_sure(watcher, obstacles):
-    assert PersonGuard(watcher, obstacles, 0.02, 0.02, 1.5, clock=Clock()).stop_reason()
+    assert PersonGuard(watcher, obstacles, 0.9, 0.02, 0.02, 1.5, clock=Clock()).stop_reason()
 
 
 def test_watcher_places_detections_and_reports_a_crash():

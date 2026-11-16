@@ -1,13 +1,14 @@
 """People: when a person is in the robot's way, ALL motion stops until they've gone.
 
     camera frame -> small standard YOLO (knows "person") -> person boxes
-    obstacle check (depth)  -> red area: in the robot's path, closer than obstacles.warn_row
-    PersonGuard: a person box (grown by people.margin) overlapping the red area -> stop everything,
-                 until that hasn't been the case for people.clear_s
+    obstacle check (depth)  -> per pixel: in the robot's path? and how far (the row it stands on)
+    PersonGuard: a person box (grown by people.margin) overlapping the path closer than
+                 people.warn_row -> stop everything, until that hasn't been the case for people.clear_s
 
-So "close" means the same as for any obstacle (warn_row), but for a person the reaction is a full
-stop instead of only blocking forward: the person may step beside or behind the robot, where the
-camera can't see. So no turning, backing or sideways either; standing up / lying down still work.
+people.warn_row works like obstacles.warn_row (same scale), but is its own value: people usually get
+a bigger margin than boxes. And the reaction is a full stop instead of only blocking forward: the
+person may step beside or behind the robot, where the camera can't see. So no turning, backing or
+sideways either; standing up / lying down still work.
 
 - When it isn't sure (no picture yet, a picture older than STALE_S, either check crashed): stop too.
 - The distance shown next to each box (feet = box bottom-centre on the floor) is for display only.
@@ -135,15 +136,16 @@ class PersonGuard:
     to SafeDog (dog.stop_guard): every control tick SafeDog asks it, and while it returns a reason,
     every speed is 0, whoever asked for it. Thread-safe: SafeDog's loop and the window both call it.
 
-    obstacles: the ObstacleWatcher. Its result's `mask` marks the red pixels (in the path, closer than
-    warn_row; when no floor is visible at all, the covered floor). A person box grown by `margin`
-    (fraction of the picture, for the two checks seeing frames a few hundredths of a second apart)
-    with at least `overlap` of its area red = the person is in the way.
+    obstacles: the ObstacleWatcher. "Red for people" = its pixels in the robot's path standing on or
+    before `warn_row` (when no floor is visible at all: the covered floor). A person box grown by
+    `margin` (fraction of the picture, for the two checks seeing frames a few hundredths of a second
+    apart) with at least `overlap` of its area red = the person is in the way.
     """
 
-    def __init__(self, watcher, obstacles, margin: float, overlap: float, clear_s: float, clock=time.monotonic):
+    def __init__(self, watcher, obstacles, warn_row: float, margin: float, overlap: float, clear_s: float,
+                 clock=time.monotonic):
         self.watcher, self.obstacles = watcher, obstacles
-        self.margin, self.overlap, self.clear_s = margin, overlap, clear_s
+        self.warn_row, self.margin, self.overlap, self.clear_s = warn_row, margin, overlap, clear_s
         self.clock = clock
         self._last_in_way = -float("inf")
         self._lock = threading.Lock()
@@ -173,12 +175,19 @@ class PersonGuard:
                 return "person check: waiting for the first picture", people or []
             if max(age, oage) > STALE_S:
                 return f"person check: no fresh picture ({max(age, oage):.1f} s old)", people
-            if res.mask is not None and any(self.in_the_way(p, size, res.mask) for p in people):
+            red = self.red(res)
+            if red is not None and any(self.in_the_way(p, size, red) for p in people):
                 self._last_in_way = now
                 return "PERSON in the way", people
             if now - self._last_in_way <= self.clear_s:
                 return f"person just left: waiting {self.clear_s - (now - self._last_in_way):.1f} s", people
             return None, people
+
+    def red(self, res) -> np.ndarray | None:
+        """The pixels that count as "in the way" for people: in the path, on or before warn_row."""
+        if res.status == "blocked" or res.in_path is None or res.foot is None:
+            return res.mask     # no floor visible: the covered floor counts
+        return res.in_path & (res.foot >= self.warn_row)
 
     def stop_reason(self) -> str | None:
         return self.check()[0]

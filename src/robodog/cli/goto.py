@@ -26,8 +26,8 @@ distances, and drive with the teleop keys.
                on the object. Put the value in camera.latency_s
           SPACE  E-STOP (stop + lie down, latched)    Esc  lie down and quit
 
-With --people (needs --obstacles), a person in the obstacle check's red area stops ALL motion until
-they've gone; go-to pauses. With --obstacles, the obstacle check runs on the same camera: while something is in the robot's
+With --people (needs --obstacles), a person in the robot's path closer than people.warn_row (the
+magenta line) stops ALL motion until they've gone; go-to pauses. With --obstacles, the obstacle check runs on the same camera: while something is in the robot's
 path (or the check isn't sure), FORWARD driving is blocked for go-to and the keys alike; go-to
 pauses (goal kept). Backward, turning and sideways still work.
 
@@ -178,10 +178,10 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
         detector = PersonDetector(pc.model, pc.conf, pc.imgsz)
         person_watcher = PersonWatcher(frames.get_stamped, detector,
                                        lambda w, h: camera_for(cfg.camera, w, h, args.posture))
-        people = PersonGuard(person_watcher, obstacle_watcher, pc.margin, pc.overlap, pc.clear_s)
+        people = PersonGuard(person_watcher, obstacle_watcher, pc.warn_row, pc.margin, pc.overlap, pc.clear_s)
         dog.stop_guard = people.stop_reason
-        print(f"person check on ({detector.device}): a person in the obstacle check's red area stops ALL "
-              f"motion until that hasn't been the case for {pc.clear_s:.1f} s; go-to pauses meanwhile")
+        print(f"person check on ({detector.device}): a person in the path closer than people.warn_row "
+              f"({pc.warn_row}) stops ALL motion until that hasn't been the case for {pc.clear_s:.1f} s; go-to pauses meanwhile")
     tele = Teleop(dog, log=print)
     hold_keys, click_keys = key_maps()
 
@@ -389,7 +389,7 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
             obstacle = guard.check() if guard is not None else None
             marks = None   # the obstacle check's newest verdict, to draw on the picture
             if obstacle_watcher is not None and show_obstacles:
-                marks = (obstacle_watcher.latest()[0], ocfg)
+                marks = (obstacle_watcher.latest()[0], ocfg, people.warn_row if people is not None else None)
             draw(screen, (big, mid, small), frame, scale, view_h, model, grid, goto, step, pose, seen_pose, tele,
                  status, message, calibrating, last_click, drive_ok, fake, g_held, latency, trash, obstacle, marks,
                  (person, seen_people) if people is not None else None)

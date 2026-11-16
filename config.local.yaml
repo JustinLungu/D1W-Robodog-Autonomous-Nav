@@ -98,14 +98,16 @@ obstacles:
   target_margin: 0.03
 
 # People (robodog-teleop / robodog-goto --obstacles --people): a person whose box overlaps the
-# obstacle check's RED area (in the robot's path, closer than obstacles.warn_row) stops ALL motion
-# (forward, back, turning, sideways) until that hasn't been the case for clear_s. Also stops when
-# either check isn't sure (no picture yet, old picture, crashed).
+# robot's path closer than people.warn_row stops ALL motion (forward, back, turning, sideways) until
+# that hasn't been the case for clear_s. Also stops when either check isn't sure (no picture yet,
+# old picture, crashed).
 people:
   model: "models/yolo11n.pt"   # Ultralytics' small standard YOLO (knows "person"). Downloaded on the
                                # first run (~5 MB, needs internet) into models/ (git-ignored)
   conf: 0.4                    # detection confidence needed
   imgsz: 640                   # detector input size (px)
+  warn_row: 0.86               # like obstacles.warn_row, for people (bigger = closer). Smaller than the
+                               # objects' value = stops earlier, further away (0.88 ~ 1.5 m, 0.93 ~ 1.2 m)
   margin: 0.02                 # person box grown by this on every side (fraction of the picture)
   overlap: 0.02                # at least this fraction of the grown box red = the person is in the way
   clear_s: 1.5                 # ...stop until that hasn't been the case for this long
