@@ -16,6 +16,9 @@ height / offset measured and its pitch calibrated with K). Until then you can st
 distances, and drive with the teleop keys.
 
   MOUSE   click the floor        set the goal (shown as a ring; red = refused)
+          --goal X,Y             or: a goal X m ahead, Y m left of the robot's middle, set once it has
+                                 stood up (R). Also behind things the camera can't see past; the same
+                                 goal for every run, to compare methods fairly
           click a trash box      (--trash) go to that piece, tracking it while it's in view
   HOLD    G                      go to the goal. Let go = stop (the goal is kept)
   HOLD    W/S A/D Q/E (arrows)   drive by hand, like robodog-teleop (overrides G)
@@ -55,7 +58,7 @@ from .teleop import key_maps
 
 RATE_HZ = 30
 VIEW_W = 960       # camera view width in the window
-PANEL_H = 235   # room for the obstacle and person lines (--obstacles, --people)
+PANEL_H = 255   # room for the avoid, person and obstacle lines
 BG, FG, DIM = (24, 26, 30), (230, 230, 230), (120, 124, 132)
 GREEN, AMBER, RED, BLUE, CYAN = (80, 200, 120), (240, 180, 60), (235, 70, 70), (90, 160, 240), (80, 210, 230)
 MAGENTA = (230, 80, 230)   # person boxes
@@ -83,6 +86,10 @@ def grid_polylines(model: CameraModel) -> list[tuple[float, list[tuple[float, fl
         if len(pts) >= 2:
             out.append((d, pts))
     return out
+
+
+class _NotSteady(Exception):
+    """--goal: the position estimate hasn't been steady long enough yet."""
 
 
 def target_box(box, width: int, height: int, margin: float) -> tuple[float, float, float, float]:
@@ -168,6 +175,16 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
               "ahead or the check isn't sure; go-to pauses meanwhile")
     # Person check (--people): on the same camera stream. A person close in front stops ALL motion
     # (SafeDog), and go-to pauses (the goal is kept) until they've gone.
+    # Obstacle avoidance (--avoid backoff): back up and turn instead of only stopping (avoid/).
+    avoider = None
+    if args.avoid == "backoff":
+        from ..avoid import BackoffAvoider, BackoffSettings
+
+        a = cfg.avoid
+        avoider = BackoffAvoider(BackoffSettings(back_m=a.back_m, turn_deg=a.turn_deg, forward_m=a.forward_m))
+        print(f"obstacle avoidance: back off {a.back_m} m, turn {a.turn_deg} deg away, drive {a.forward_m} m, "
+              "then on to the goal (only when the forward block fires)")
+    avoid_choice = None
     person_watcher, people = None, None
     if args.people:
         from ..vision.people import PersonDetector, PersonGuard, PersonWatcher
@@ -225,6 +242,8 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
     status, next_status = {}, 0.0
     last_click: tuple[float, float, float, float] | None = None  # u, v, X, Y
     step = goto.step((0.0, 0.0, 0.0), False, 0.0)
+    typed_goal = args.goal   # --goal: set once the robot stands still after R (its position settles then)
+    steady_pose, steady_since, wait_since = None, 0.0, 0.0
     clock = pg.time.Clock()
     last = time.monotonic()
     next_log = 0.0
@@ -320,6 +339,32 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
             if not focused:
                 tele.release_all()
 
+            if typed_goal is not None and tele.standing and dog.settled():
+                try:
+                    p_now = dog.pose()
+                    # The position estimate can still jump after standing up: wait until it has been
+                    # steady (< 2 cm, < 1 deg) for 1 s before fixing the goal to it; after 5 s of
+                    # waiting, take it anyway (it drifts on our robot even standing still).
+                    t_now = time.monotonic()
+                    wait_since = wait_since or t_now
+                    if t_now - wait_since < 5.0:
+                        if steady_pose is None or math.hypot(p_now[0] - steady_pose[0], p_now[1] - steady_pose[1]) > 0.02 \
+                                or abs(math.degrees(p_now[2] - steady_pose[2])) > 1.0:
+                            steady_pose, steady_since = p_now, t_now
+                            raise _NotSteady
+                        if t_now - steady_since < 1.0:
+                            raise _NotSteady
+                    else:
+                        print("--goal: the position estimate never settled (it drifts); setting the goal anyway")
+                    err = goto.set_goal(*typed_goal, p_now)
+                    message = err or (f"goal from --goal: {typed_goal[0]:.2f} m ahead, {typed_goal[1]:+.2f} m left "
+                                      "of the robot's middle. Hold G to go")
+                    print(message)
+                    typed_goal = None
+                except _NotSteady:
+                    message = "--goal: waiting for the position estimate to settle..."
+                except Exception as e:
+                    message = f"--goal: {e!r}"
             try:
                 pose = dog.pose()
             except Exception as e:
@@ -359,15 +404,37 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
                 message = f"paused, FORWARD BLOCKED: {blocked}. Back off / turn by hand (S, A/D, Q/E)"
             if going and person and goto.goal is not None and step.state not in FINAL_STATES:
                 message = f"paused, ALL MOTION STOPPED: {person}. Continues once they've gone"
-            step = goto.step(pose, going and not blocked and not person, dt)   # paused, goal kept
+            avoid_choice, side_cmd = None, None
+            if avoider is not None and going and goto.goal is not None and step.state not in FINAL_STATES:
+                from ..avoid import red_side
+                from ..vision.obstacles import ObstacleChecker
+
+                res = obstacle_watcher.latest()[0]
+                box = ObstacleChecker(ocfg).box(res.horizon) if res is not None and res.horizon > 0 else None
+                tb = goto.target_bearing(pose)
+                # Only a real obstacle (red) triggers backing off. "Not sure" (no / old picture) also
+                # blocks forward, but then it just waits: backing up blind would be worse.
+                seen_obstacle = bool(blocked) and guard.check()[0] == "warn"
+                if tb is not None:
+                    avoid_choice = avoider.update(seen_obstacle, red_side(res, box), pose, tb[0], now)
+                    if avoid_choice.active:
+                        side_cmd = avoid_choice
+                        goto.spend(dt)          # counts toward go-to's timeout: dead ends end there
+                        goto.rebase_guard(pose) # ...but not toward the overshoot guard
+            if side_cmd is not None:   # backing off / turning: go-to waits (goal kept)
+                step = goto.step(pose, False, dt)
+                message = f"getting around an obstacle: {side_cmd.reason}"
+            else:
+                step = goto.step(pose, going and not blocked and not person, dt)   # paused, goal kept
             if going and step.dist is not None and now >= next_log:  # (no goal: nothing to log; G does nothing)
                 next_log = now + 0.5
-                print(f"go-to [{step.state}] goal {step.dist:.2f} m from middle | commanded {goto.commanded_m:.2f} m, "
+                print(f"go-to [{side_cmd.state if side_cmd is not None else step.state}] goal {step.dist:.2f} m from middle | commanded {goto.commanded_m:.2f} m, "
                       f"robot estimate {goto.robot_m:.2f} m, needed {goto.needed_m:.2f} m | pose x {pose[0]:+.2f} "
                       f"y {pose[1]:+.2f} heading {math.degrees(pose[2]):+.0f}")
             if going:
+                vx, vy, yaw = (side_cmd.vx, side_cmd.vy, side_cmd.yaw) if side_cmd is not None else (step.vx, 0.0, step.yaw)
                 try:
-                    dog.set_velocity(step.vx, 0.0, step.yaw)
+                    dog.set_velocity(vx, vy, yaw)
                 except SafetyError as e:
                     message = f"stopped: {e}"
             else:
@@ -392,7 +459,8 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
                 marks = (obstacle_watcher.latest()[0], ocfg, people.warn_row if people is not None else None)
             draw(screen, (big, mid, small), frame, scale, view_h, model, grid, goto, step, pose, seen_pose, tele,
                  status, message, calibrating, last_click, drive_ok, fake, g_held, latency, trash, obstacle, marks,
-                 (person, seen_people) if people is not None else None)
+                 (person, seen_people) if people is not None else None,
+                 (args.avoid, avoid_choice) if avoider is not None else None)
             clock.tick(RATE_HZ)
     finally:
         print("lying down and closing...")
@@ -408,7 +476,7 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
 
 def draw(screen, fonts, frame, scale, view_h, model, grid, goto, step, pose, seen_pose, tele, status, message,
          calibrating, last_click, drive_ok, fake, g_held, latency, trash=None, obstacle=None, marks=None,
-         person=None):
+         person=None, avoid=None):
     import pygame as pg
 
     big, mid, small = fonts
@@ -437,13 +505,13 @@ def draw(screen, fonts, frame, scale, view_h, model, grid, goto, step, pose, see
     if last_click and not goto.goal:
         pg.draw.circle(screen, AMBER, sp(last_click[:2]), 6, 2)
 
-    # People (--people): magenta boxes with their distance; "close" if they stop the robot.
+    # People (--people): magenta boxes    # People (--people): magenta boxes with their distance; "close" if they stop the robot.
     if person is not None:
         for pp in person[1]:
             x0, y0 = sp(pp.box[:2])
             x1, y1 = sp(pp.box[2:])
             pg.draw.rect(screen, MAGENTA, (x0, y0, max(1, x1 - x0), max(1, y1 - y0)), 2)
-            d = "very close" if pp.dist is None else f"{pp.dist:.1f} m"
+            d = "very close" if pp.dist is None else ("far" if math.isinf(pp.dist) else f"{pp.dist:.1f} m")
             lab = small.render(f"person {pp.conf:.2f}  {d}", True, (0, 0, 0), MAGENTA)
             screen.blit(lab, (x0, y0 - lab.get_height() if y0 > lab.get_height() else y1))
 
@@ -529,6 +597,12 @@ def draw(screen, fonts, frame, scale, view_h, model, grid, goto, step, pose, see
         screen.blit(small.render(tl, True, tcol), (12, y))
         y += 20
     y += 4
+    if avoid is not None:      # (method, its latest choice or None)
+        ch = avoid[1]
+        text = "idle (hold G)" if ch is None else ch.reason
+        col = GREEN if ch is not None and ch.active else FG
+        screen.blit(small.render(f"avoid ({avoid[0]}): {text}", True, col), (12, y))
+        y += 20
     if person is not None:     # (why everything is stopped or None, people seen) from the person guard
         if person[0]:
             screen.blit(small.render(f"ALL MOTION STOPPED: {person[0]}", True, RED), (12, y))
@@ -566,6 +640,12 @@ def main():
     ap.add_argument("--hfov", type=float, help="override camera.hfov_deg (e.g. 70 for a laptop webcam)")
     ap.add_argument("--trash", action="store_true",
                     help="detect + track trash (needs the vision extra): click a box to go to that piece")
+    ap.add_argument("--goal", type=lambda t: tuple(float(v) for v in t.split(",")), metavar="X,Y",
+                    help="a goal X m ahead and Y m left of the robot's middle (e.g. 3.0,0.0), set once it has "
+                         "stood up (R): the same goal every run, also behind obstacles")
+    ap.add_argument("--avoid", choices=["none", "backoff"],
+                    help="obstacle avoidance (needs --obstacles): none = stop at obstacles; backoff = back up, "
+                         "turn away from it, drive on. Default: avoid.method in config.local.yaml")
     ap.add_argument("--people", action="store_true",
                     help="person check (needs --obstacles): a person in the obstacle check's red area stops "
                          "ALL motion until they've gone; go-to pauses meanwhile")
@@ -582,6 +662,12 @@ def main():
     args = ap.parse_args()
     if args.people and not args.obstacles:   # before anything connects to the robot
         ap.error("--people needs --obstacles: it stops for a person in the obstacle check's red area")
+    if args.goal is not None and len(args.goal) != 2:
+        ap.error("--goal needs two numbers: X,Y (metres ahead, metres to the left), e.g. 3.0,0.0")
+    if args.avoid is None:
+        args.avoid = load_config(args.config).avoid.method
+    if args.avoid != "none" and not args.obstacles:
+        ap.error(f"--avoid {args.avoid} needs --obstacles: it steers by what the obstacle check sees")
 
     try:
         import pygame  # noqa: F401

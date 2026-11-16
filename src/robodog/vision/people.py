@@ -35,7 +35,8 @@ STALE_S = 1.5   # a verdict about a picture older than this says nothing about n
 class Person:
     box: tuple[float, float, float, float]   # x0, y0, x1, y1 in frame pixels
     conf: float
-    dist: float | None   # metres on the floor from the point under the camera (display); None = feet not visible
+    dist: float | None   # metres on the floor from under the camera (display); None = feet cut off (very
+                         # close); inf = feet at/above the horizon (far, or the floor maths can't place them)
 
 
 def place(box, conf: float, model) -> Person:
@@ -44,8 +45,8 @@ def place(box, conf: float, model) -> Person:
     if y1 >= model.height * 0.99:      # feet cut off by the picture's bottom: no floor point
         return Person(tuple(box), conf, None)
     floor = model.pixel_to_floor((x0 + x1) / 2, y1)
-    if floor is None:                  # "feet" above the horizon: can't place it
-        return Person(tuple(box), conf, None)
+    if floor is None:                  # "feet" at/above the horizon: far away (can't place them)
+        return Person(tuple(box), conf, float("inf"))
     return Person(tuple(box), conf, float(np.hypot(floor[0] - model.forward_offset_m, floor[1])))
 
 
@@ -136,10 +137,11 @@ class PersonGuard:
     to SafeDog (dog.stop_guard): every control tick SafeDog asks it, and while it returns a reason,
     every speed is 0, whoever asked for it. Thread-safe: SafeDog's loop and the window both call it.
 
-    obstacles: the ObstacleWatcher. "Red for people" = its pixels in the robot's path standing on or
-    before `warn_row` (when no floor is visible at all: the covered floor). A person box grown by
+    obstacles: the ObstacleWatcher. A person is in the way when their FEET (box bottom) are on or
+    before `warn_row` (or cut off by the picture's bottom: very close), and their box, grown by
     `margin` (fraction of the picture, for the two checks seeing frames a few hundredths of a second
-    apart) with at least `overlap` of its area red = the person is in the way.
+    apart), has at least `overlap` of its area "red for people": in the robot's path, standing on or
+    before `warn_row` (when no floor is visible at all: the covered floor).
     """
 
     def __init__(self, watcher, obstacles, warn_row: float, margin: float, overlap: float, clear_s: float,
@@ -151,8 +153,14 @@ class PersonGuard:
         self._lock = threading.Lock()
 
     def in_the_way(self, p: Person, size: tuple[int, int], mask: np.ndarray) -> bool:
-        """Does this person's box (+ margin) cover enough red?"""
+        """Is this person close (their FEET on or before warn_row, or cut off by the picture's bottom)
+        and does their box (+ margin) cover enough of the path? Feet first: a person standing BEHIND
+        a box has their box overlapping the box's close pixels, but their feet are far away (seen on
+        the robot: "PERSON in the way" for someone ~4 m off, behind a cardboard box)."""
         w, h = size
+        feet = p.box[3] / h
+        if feet < 0.99 and feet < self.warn_row - self.margin:
+            return False
         mh, mw = mask.shape
         x0, y0, x1, y1 = p.box
         c0 = int(max(0.0, x0 / w - self.margin) * mw)

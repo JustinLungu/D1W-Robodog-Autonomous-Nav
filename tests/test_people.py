@@ -180,3 +180,19 @@ def test_safedog_treats_a_crashing_person_guard_as_stop():
     dog.set_velocity(0.0, 0.0, 0.3)
     dog.tick()
     assert moves(robot)[-1] == (0.0, 0.0, 0.0) and "boom" in dog.stopped_for
+
+
+def test_person_behind_a_close_box_is_not_in_the_way():
+    # Seen on the robot: someone ~4 m away, behind a cardboard box that IS close. Their box reaches
+    # down over the box's close pixels, but their feet (box bottom) are far up the picture.
+    behind = Person((800, 150, 900, 450), 0.8, 3.9)     # feet at row 0.62, the close red is below 0.55
+    obstacles = FakeObstacles()
+    obstacles.res.in_path[:, :] = True                  # everything in front counts as in the path
+    assert guard([behind], obstacles).stop_reason() is None
+    assert guard([IN_RED], obstacles).stop_reason() == "PERSON in the way"   # feet close: still stops
+
+
+
+def test_feet_above_the_horizon_are_far_not_close():
+    p = place((600, 100, 700, 200), 0.7, CAM)           # feet well above the horizon row
+    assert p.dist == float("inf")

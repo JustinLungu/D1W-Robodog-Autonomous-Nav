@@ -498,11 +498,28 @@ A small standard YOLO (Ultralytics `yolo11n`, knows "person") runs on the laptop
 uv run --no-sync --extra vision-gpu robodog-teleop --allow-motion --obstacles --people
 uv run --no-sync --extra vision-gpu robodog-goto --allow-motion --trash --obstacles --people
 ```
+- **Feet first:** a person only counts if their **feet** (the box bottom) are on or before the magenta line, or cut off by the picture's bottom (very close). Someone standing *behind* a close box no longer counts (their box overlapped the box's close pixels: "PERSON in the way" for someone ~4 m off).
 - **Overlap test:** the person box is grown by `people.margin` (2 % of the picture on every side, because the two checks look at frames a few hundredths of a second apart); if at least `people.overlap` (2 %) of it is in the path before the magenta line, the person is in the way. A person beside the path or beyond the magenta line doesn't stop anything.
 - **First run needs internet:** the model (~5 MB) is downloaded from Ultralytics' GitHub releases into `models/` (git-ignored). After that it works offline.
 - **When unsure, it stops:** no picture yet (the first seconds), a picture older than 1.5 s in either check, or either check crashed.
 - People are drawn as **magenta boxes** (with their floor distance, for information); teleop shows a red **STOPPED: PERSON in the way** bar, go-to `ALL MOTION STOPPED: ...` and pauses (goal kept), then continues by itself. The terminal logs `ALL MOTION STOPPED: ...` / `motion allowed again`.
 - Settings: `people:` in `config.local.yaml`. Code: [vision/people.py](src/robodog/vision/people.py), SafeDog's `stop_guard`.
+
+### 6.9c Getting around obstacles: back off and turn (`--avoid backoff`, the default)
+The simplest method ([avoid/backoff.py](src/robodog/avoid/backoff.py)). No map, no memory, **no position estimate**: on our robot that drifts (~0.2 m standing still) and jumps, which broke smarter methods we tried (gap steering, sidestepping with an obstacle memory: phantom obstacles, false dead ends; removed 2026-11-16). Go-to drives as usual; **only when the forward block fires on a real obstacle** (red in the yellow box):
+1. **back up** `avoid.back_m` (0.25 m, timed), already **turning a little** (0.12 rad/s) toward the side it will go,
+2. **turn** until `avoid.turn_deg` (25°) away from where it faced, **away from the side with more red** (by the IMU heading),
+3. **drive on** `avoid.forward_m` (1 m) on that heading, so it gets beside the obstacle,
+4. **curve gently back** toward the target while driving (at most 0.15 rad/s), instead of go-to's turn on the spot, which pointed it straight back at the obstacle (back and forth),
+5. then go-to heads for the goal again. Blocked again on the way or soon after → again, **same side** (no zig-zag).
+
+The warning line is `obstacles.warn_row: 0.9`, about **1.76 m from the camera** by our calibration. Bigger = reacts closer, but the yellow box gets bigger too (1.0 = ~1.2 m).
+
+**Overshoot guard:** while backoff drives, go-to's guard is re-based ("driven so far + still needed from here"), so rounds of "toward it, back off" don't add up until it stops go-to for good (seen on the robot as `[overshoot guard]`, stuck). **Dead ends** aren't detected: go-to's timeout (`goto.timeout_s`) ends them; the time spent backing off counts toward it. When the obstacle check **isn't sure** (no / old picture) it doesn't back off blind: it just waits, blocked. Panel: `avoid (backoff): straight / backing off / turning left / getting beside it / straight (got around 2x)`.
+```bash
+uv run --no-sync --extra vision-gpu robodog-goto --allow-motion --obstacles --people --goal 3.0,0.0     # backoff is the default
+```
+**Same goal every run:** `--goal 3.0,0.0` sets a goal 3 m ahead, 0 m to the side of the robot's middle, once it has stood up (R) and its position estimate has been steady for 1 s (at most 5 s: it drifts on our robot). Use it to compare runs on a course (no clicking differences), and for goals the camera can't see (behind a box). Then hold G as usual.
 
 ### 6.10 The robot's own person detection (just for a look)
 The robot already runs a person detector on its NPU (`detection_2d_node`, YOLO11n, classes person and car). It's meant for a "follow me" feature and nothing in our code uses it. This shows its boxes on the live camera, by **listening** to its ROS 2 topic `/perception/detection2d` from the laptop: nothing is sent to the robot, nothing runs on it, no ROS install needed.
