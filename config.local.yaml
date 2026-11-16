@@ -52,15 +52,16 @@ goto:
 trash:
   # YOLO weights: a local .pt path, or hf://<repo>/<file>. Default: YOLO11s fine-tuned on TACO
   # (classes: plastic bag & wrapper, cigarette, bottle, bottle cap, can, other plastic, carton, cup, other).
-  model: "hf://fabiocigaina/TACO-yolo11s/best_model.pt"
+  # model: "hf://fabiocigaina/TACO-yolo11s/best_model.pt"
+  model: tools/kaggle/models/intermediate_best.pt
   # Other models work too, e.g. Ultralytics' own "yolo11s.pt" (trained on COCO: knows cup, bottle...;
   # downloaded automatically) with classes: "cup, bottle". Or an open-vocabulary one like
   # "yolov8s-worldv2.pt", where classes are the words to look for: "cup, can, plastic bottle, paper".
   classes: ""            # comma-separated class names to keep. "" = everything the model knows
   conf: 0.25             # confidence needed to START tracking a piece. Lower = finds more, with more false boxes.
                          # (An existing track is continued with weaker detections too, down to 0.1.)
-  imgsz: 896             # detector input size (this model was trained at 896). 640 is ~2x faster
-  follow_vx: 0.30        # m/s while driving to a tracked piece: slow, so the tracker keeps up
+  imgsz: 1280             # detector input size (this model was trained at 896). 640 is ~2x faster
+  follow_vx: 0.10        # m/s while driving to a tracked piece: slow, so the tracker keeps up
   lost_after_s: 1.0      # not seen for this long -> finish blind, on odometry
   reacquire_m: 0.4       # the tracker renamed the piece: a track this close to the goal is taken as the same
   csrt_max_s: 2.0        # YOLO lost the SELECTED piece: OpenCV's CSRT tracker follows its pixels for up to

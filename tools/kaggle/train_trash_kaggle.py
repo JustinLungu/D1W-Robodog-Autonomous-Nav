@@ -1,7 +1,7 @@
 # %% [markdown]
 # # Robodog trash detector: fine-tune YOLO on open litter data + our robot recordings (Kaggle)
 #
-# What this notebook does (one "Run all", ~2-3 h on a Kaggle T4):
+# What this notebook does (one "Run all", ~1-1.5 h on a Kaggle T4):
 # 1. **Our hand-labelled robot frames** (Roboflow export, YOLO format): found automatically by their
 #    file names (they start with the recording's date_time). The split follows the VIDEO: frames of
 #    the newest recording are validation only, whatever split Roboflow made.
@@ -28,6 +28,14 @@
 # 6. **Save Version -> Save & Run All (Commit)**: runs in the background, you can close the tab.
 #    Results: the version's **Output** tab (`trash_yolo11s_1280.pt`, `videos/*.mp4`, previews).
 #
+# ## Pause and continue (training saves `runs/trash/weights/last.pt` after EVERY epoch)
+# - **Same session** (interactive): press Stop (the square) on the training cell, change settings if
+#   you like (`EPOCHS`, `WORKERS`, `BATCH`, `PATIENCE`), run the settings cell and the training cell
+#   again: it continues from the last finished epoch (`RESUME = True`).
+# - **New session**: download `runs/trash/weights/last.pt` from the Output panel first (the files
+#   are gone when the session ends), upload it as a dataset, add it as input, set `RESUME_FROM` to
+#   its path (e.g. "/kaggle/input/robodog-last/last.pt") and Run all.
+#
 # ## Use the model on the laptop
 # Download `trash_yolo11s_1280.pt` -> put it in the repo, e.g. `models/` -> in `config.local.yaml`:
 # `trash.model: models/trash_yolo11s_1280.pt`, `trash.imgsz: 1280`, `trash.classes: ""` (or "litter").
@@ -47,8 +55,8 @@ FLOOR_FROM = 0.55          # only search below this fraction of the frame height
 MIN_BOTTOM = 0.74          # a box must end below this fraction (= it lies on the floor, not on a table)
 MAX_AREA = 0.03            # drop boxes bigger than 3 % of the frame (from this camera trash is small)
 EMPTY_KEEP = 0.10          # keep this share of frames with no trash found (as "background")
-OPEN_MAX_IMAGES = 2500     # cap on open-dataset images in total (keeps the run ~2 h)
-OPEN_MAX_PER_SOURCE = 1200 # ...and per dataset, so one big dataset doesn't crowd out the others
+OPEN_MAX_IMAGES = 1500     # cap on open-dataset images in total (fewer = faster epochs)
+OPEN_MAX_PER_SOURCE = 800  # ...and per dataset, so one big dataset doesn't crowd out the others
 OWN_REPEAT = 3             # our hand-labelled training frames are used this many times (more weight
                            # for our camera's view next to thousands of public images)
 # Classes in public datasets that are NOT trash (matched as words in the dataset's class names):
@@ -57,17 +65,22 @@ SKIP_CLASS_WORDS = ["person", "people", "human", "hand", "face", "bin", "contain
 OPEN_MAX_SIDE = 1280       # open-dataset images are resized to at most this
 MODEL = "yolo11s.pt"       # yolo11n.pt = faster on the laptop CPU later, yolo11m.pt = more accurate
 IMGSZ = 1280
-EPOCHS = 60
+EPOCHS = 40                # it usually stops improving well before; PATIENCE ends it early
+PATIENCE = 10              # stop when validation hasn't improved for this many epochs
 BATCH = 8                  # T4 16 GB: 8 at 1280 for yolo11s; lower if "CUDA out of memory"
-WORKERS = 2                # image-loading processes; each holds 1280 px mosaics in RAM (0-2 on Kaggle)
+WORKERS = 3                # image-loading processes (Kaggle has 4 CPUs); each holds 1280 px mosaics in RAM.
+                           # Out of RAM -> 2 or 0. GPU meter low + CPU meter full -> loading is the bottleneck
 TRAIN_RETRIES = 2          # if training dies (e.g. out of RAM), resume from the last checkpoint this often
+RESUME = True              # an unfinished training in runs/trash: continue it (False: start over)
+RESUME_FROM = ""           # a last.pt from an earlier session (uploaded as input), e.g. "/kaggle/input/x/last.pt"
 VAL_VIDEOS = 1             # the newest N recordings are used for validation only
 RENDER_CONF = 0.25         # confidence for the rendered videos
 GD_NAME = "IDEA-Research/grounding-dino-base"
 
 import os
 if os.environ.get("TRASH_SMOKE"):   # quick local test of the whole notebook (not for Kaggle)
-    MODEL, IMGSZ, EPOCHS, BATCH, OPEN_MAX_IMAGES = "yolo11n.pt", 320, 1, 4, 20
+    MODEL, IMGSZ, BATCH, OPEN_MAX_IMAGES = "yolo11n.pt", 320, 4, 20
+    EPOCHS = int(os.environ.get("TRASH_SMOKE_EPOCHS", 1))
     GD_NAME = "IDEA-Research/grounding-dino-tiny"
 
 # %%
@@ -189,10 +202,18 @@ for img, txt, split, rec in own_items:
     sizes[(W, H)] = sizes.get((W, H), 0) + 1
     boxes = read_yolo_boxes(txt, W, H)
     label = "\n".join(yolo_line(b, W, H) for b in boxes)
+    f = min(1.0, IMGSZ / max(W, H))           # training resizes to IMGSZ anyway: store at that size
+    small = cv2.resize(im, (round(W * f), round(H * f)), interpolation=cv2.INTER_AREA) if f < 1 else im
+    first = None
     for k in range(OWN_REPEAT if split == "train" else 1):
         name = f"own_{img.stem}" + (f"_r{k}" if k else "")
-        shutil.copy(img, DS / f"images/{split}/{name}{img.suffix.lower()}")
+        dst = DS / f"images/{split}/{name}.jpg"
+        if first is None:
+            cv2.imwrite(str(dst), small, [cv2.IMWRITE_JPEG_QUALITY, 95]); first = dst
+        else:
+            shutil.copy(first, dst)
         (DS / f"labels/{split}/{name}.txt").write_text(label)
+    del im, small
     own_stats[split][0] += 1; own_stats[split][1] += len(boxes)
     if boxes:
         own_preview.append((img, boxes, f"own_{img.stem}"))   # path only: full frames would eat ~2 GB RAM
@@ -437,8 +458,12 @@ print((DS / "data.yaml").read_text())
 # %%
 # Training runs in a SEPARATE Python process: the notebook's own memory (previews, dataset lists)
 # isn't added to it, and if it dies (out of RAM) the notebook survives and resumes from the last
-# checkpoint (saved every 5 epochs + after every epoch as last.pt).
-import gc
+# checkpoint (last.pt, saved after every epoch).
+# Output: the running progress bar stays on ONE line that updates; only finished lines are kept
+# (one line per epoch + the validation scores), with the time per epoch and the time left.
+# To PAUSE: Stop this cell. To continue: run it again (see "Pause and continue" at the top).
+import gc, time
+import matplotlib.pyplot as plt
 from ultralytics import YOLO
 
 gc.collect()
@@ -450,31 +475,181 @@ except ImportError:
     pass
 
 run_dir = WORK / "runs/trash"
-last = run_dir / "weights/last.pt"
+last, best = run_dir / "weights/last.pt", run_dir / "weights/best.pt"
 train_args = dict(data=str(DS / "data.yaml"), imgsz=IMGSZ, epochs=EPOCHS, batch=BATCH,
-                  device=0 if DEVICE == "cuda" else "cpu", patience=20, degrees=0, flipud=0.0, fliplr=0.5,
+                  device=0 if DEVICE == "cuda" else "cpu", patience=PATIENCE, degrees=0, flipud=0.0, fliplr=0.5,
                   scale=0.5, mosaic=1.0, close_mosaic=10, hsv_v=0.5, project=str(WORK / "runs"), name="trash",
                   exist_ok=True, plots=True, workers=WORKERS, cache=False, save_period=5)
+# settings that may change when continuing (the others stay as the run started)
+resume_args = dict(data=str(DS / "data.yaml"), batch=BATCH, workers=WORKERS, patience=PATIENCE,
+                   device=train_args["device"], save_period=5)
+
+if RESUME_FROM and not last.exists():
+    last.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(RESUME_FROM, last)
+    print("continuing from", RESUME_FROM)
+
+
+def checkpoint_state():
+    """'none' / 'finished' / 'unfinished' (and then sets that checkpoint's total epochs to EPOCHS)."""
+    if not last.exists():
+        return "none"
+    ck = torch.load(last, map_location="cpu", weights_only=False)
+    done = ck.get("epoch", -1) + 1            # epochs finished; -1 = the run completed
+    if done <= 0 or done >= EPOCHS:
+        return "finished"
+    if ck["train_args"].get("epochs") != EPOCHS:
+        print(f"total epochs of the saved run: {ck['train_args'].get('epochs')} -> {EPOCHS}")
+        ck["train_args"]["epochs"] = EPOCHS   # the only way to change it on resume
+        torch.save(ck, last)
+    print(f"continuing the unfinished training: {done} of {EPOCHS} epochs done")
+    return "unfinished"
+
+
+ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+# Ultralytics' own per-epoch lines: replaced by ONE summary row per epoch (from results.csv)
+EPOCH_NOISE = re.compile(r"^\s*(\d+/\d+\s+\S+G\s|Epoch\s+GPU_mem|Class\s+Images|all\s+\d+\s+\d+)")
+COLS = [("train/box_loss", "box"), ("train/cls_loss", "cls"), ("train/dfl_loss", "dfl"),
+        ("val/box_loss", "box"), ("val/cls_loss", "cls"), ("val/dfl_loss", "dfl"),
+        ("metrics/precision(B)", "P"), ("metrics/recall(B)", "R"),
+        ("metrics/mAP50(B)", "mAP50"), ("metrics/mAP50-95(B)", "mAP50-95")]
+HEADER = (f"{'epoch':>9} | {'train loss: box  cls   dfl':^26} | {'val loss: box  cls   dfl':^24} | "
+          f"{'P':>5} {'R':>5} {'mAP50':>6} {'mAP50-95':>8} | time")
+
+
+def read_results():
+    f = run_dir / "results.csv"
+    if not f.exists():
+        return []
+    import csv
+    with open(f) as fh:
+        return [{k.strip(): v.strip() for k, v in row.items() if k} for row in csv.DictReader(fh)]
+
+
+def summary_row(rows, i):
+    r = rows[i]
+    v = [float(r.get(k, "nan") or "nan") for k, _ in COLS]
+    t = float(r.get("time", 0) or 0) - (float(rows[i - 1].get("time", 0) or 0) if i else 0.0)
+    left = (EPOCHS - int(float(r["epoch"]))) * t
+    return ((f"{int(float(r['epoch'])):>4}/{EPOCHS:<4} | {v[0]:8.3f} {v[1]:5.2f} {v[2]:5.3f}        | "
+            f"{v[3]:7.3f} {v[4]:5.2f} {v[5]:5.3f}      | {v[6]:5.3f} {v[7]:5.3f} {v[8]:6.3f} {v[9]:8.3f} | ")
+            + (f"{t / 60:.1f} min, ~{left / 3600:.1f} h left at most" if t > 0 else ""))
+
+
+def plot_curves(rows):
+    """Train vs validation loss + mAP per epoch: falling train loss with RISING val loss = overfitting."""
+    ep = [int(float(r["epoch"])) for r in rows]
+    col = lambda k: [float(r.get(k, "nan") or "nan") for r in rows]
+    fig, ax = plt.subplots(1, 4, figsize=(18, 3.6))
+    for a, name in zip(ax, ("box_loss", "cls_loss", "dfl_loss")):
+        a.plot(ep, col(f"train/{name}"), "o-", ms=3, label="train")
+        a.plot(ep, col(f"val/{name}"), "o-", ms=3, label="validation (robot video)")
+        a.set_title(name); a.set_xlabel("epoch"); a.grid(alpha=0.3); a.legend(fontsize=8)
+    ax[3].plot(ep, col("metrics/mAP50(B)"), "o-", ms=3, label="mAP50")
+    ax[3].plot(ep, col("metrics/mAP50-95(B)"), "o-", ms=3, label="mAP50-95")
+    ax[3].plot(ep, col("metrics/recall(B)"), "--", label="recall")
+    ax[3].set_title("validation scores (higher = better)"); ax[3].set_xlabel("epoch"); ax[3].grid(alpha=0.3)
+    ax[3].legend(fontsize=8)
+    plt.tight_layout()
+    (OUT / "previews").mkdir(exist_ok=True)
+    path = OUT / "previews" / "training_curves.png"
+    fig.savefig(path, dpi=70); plt.close(fig)
+    return path
+
+
+def run_training(code):
+    """Run one training process. Returns its exit code. Stop the cell = stop training (keeps last.pt)."""
+    proc = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            env=dict(os.environ, PYTHONUNBUFFERED="1"))
+    try:
+        from IPython import get_ipython
+        from IPython.display import Image, Pretty, display
+        if get_ipython() is None:
+            raise ImportError
+        live = display(Pretty(""), display_id=True)
+        chart = display(Pretty("(loss chart appears after the first epoch)"), display_id=True)
+    except ImportError:
+        live = chart = None
+    state = {"shown": "", "t": 0.0, "rows": 0, "header": False}
+
+    def show(text, force=False):
+        if text == state["shown"] or (not force and time.time() - state["t"] < 0.5):
+            return
+        state["shown"], state["t"] = text, time.time()
+        if live is not None:
+            live.update(Pretty(text))
+
+    def new_epochs():
+        rows = read_results()
+        if len(rows) <= state["rows"]:
+            return
+        if not state["header"]:
+            print(HEADER, flush=True); state["header"] = True
+        for i in range(state["rows"], len(rows)):
+            print(summary_row(rows, i), flush=True)
+        state["rows"] = len(rows)
+        png = plot_curves(rows)
+        if chart is not None:
+            chart.update(Image(filename=str(png)))
+
+    buf = ""
+    try:
+        while chunk := proc.stdout.read1(65536):
+            buf += chunk.decode("utf-8", "replace")
+            # a progress bar redraws with "\r<bar>"; a finished line ends with "\n"
+            *pieces, buf = re.split(r"(\r|\n)", buf)
+            for text, sep in zip(pieces[0::2], pieces[1::2]):
+                text = ANSI.sub("", text).rstrip()
+                if sep == "\r" or EPOCH_NOISE.match(text):
+                    if text:
+                        show(text.strip())
+                    continue
+                if text:
+                    print(text, flush=True)
+            if buf.strip():
+                show(ANSI.sub("", buf).strip())
+            new_epochs()
+        code = proc.wait()
+        new_epochs()
+        return code
+    except KeyboardInterrupt:
+        proc.terminate()
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        print("\n** training stopped. last.pt keeps the last FINISHED epoch: run this cell again to continue **")
+        raise
+    finally:
+        show("", force=True)
+
+
 for attempt in range(TRAIN_RETRIES + 1):
-    if attempt and last.exists():
-        print(f"\n!! training process died: resuming from {last} (attempt {attempt}/{TRAIN_RETRIES})\n")
-        code = f"from ultralytics import YOLO; YOLO({str(last)!r}).train(resume=True)"
+    state = checkpoint_state() if (RESUME or attempt) else "none"
+    if state == "finished" and best.exists():
+        print("the training is finished: using its model" + ("" if attempt else
+              " (set RESUME = False to train again from scratch)"))
+        break
+    if state == "unfinished":
+        if attempt:
+            print(f"\n!! training process died: resuming (attempt {attempt}/{TRAIN_RETRIES})\n")
+        code = (f"import json; from ultralytics import YOLO; "
+                f"YOLO({str(last)!r}).train(resume=True, **json.loads({json.dumps(resume_args)!r}))")
     else:
         if attempt:
             print("\n!! training died before the first checkpoint: starting again\n")
+        shutil.rmtree(run_dir, ignore_errors=True)          # a clean start, no mixed-up results
         code = f"import json; from ultralytics import YOLO; YOLO({MODEL!r}).train(**json.loads({json.dumps(train_args)!r}))"
-    proc = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            text=True, bufsize=1)
-    for line in proc.stdout:
-        print(line, end="", flush=True)
-    if proc.wait() == 0:
+    rc = run_training(code)
+    if rc == 0:
         break
+    if rc in (130, -2):                     # stopped with Ctrl-C / the Stop button: don't restart it
+        raise KeyboardInterrupt("training stopped: run this cell again to continue from last.pt")
 else:
-    if not (run_dir / "weights/best.pt").exists():
+    if not best.exists():
         raise RuntimeError("training failed repeatedly: lower BATCH / IMGSZ or WORKERS = 0, then run this cell again")
     print("!! training did not end cleanly, but a model was saved: continuing with the best one so far")
 
-best = run_dir / "weights/best.pt"
 shutil.copy(best, OUT / "trash_yolo11s_1280.pt")
 print("model saved:", OUT / "trash_yolo11s_1280.pt")
 
