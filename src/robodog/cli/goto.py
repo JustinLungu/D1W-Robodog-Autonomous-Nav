@@ -6,6 +6,7 @@
     uv run robodog-goto --fake --camera 0 --lens pinhole --hfov 70   # fake robot, laptop webcam
     uv run robodog-goto --allow-motion --trash                 # also detect + track trash: click a BOX to go to it
     uv run robodog-goto --allow-motion --trash --posture crawl # the same with the camera at crawl height
+    uv run robodog-goto --allow-motion --obstacles --save recordings/demo.mp4   # also save the window as video
 
 With --trash (needs the vision extra) the tracked pieces are boxed. Click a box and hold G:
 the goal stays locked on that piece while the camera sees it (every detection corrects it),
@@ -253,6 +254,12 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
     history = PoseHistory()
     latency = cam_cfg.latency_s if frames.reader else 0.0
     frame, frame_t = None, time.monotonic()
+    recorder = None
+    if args.save:   # --save: the whole window (camera view with all marks + status panel) to an .mp4
+        from ..screen_record import ScreenRecorder
+
+        recorder = ScreenRecorder(args.save, screen.get_size(), fps=args.save_fps)
+        print(f"recording the window to {args.save}")
 
     try:
         while not tele.quit:
@@ -461,10 +468,14 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
                  status, message, calibrating, last_click, drive_ok, fake, g_held, latency, trash, obstacle, marks,
                  (person, seen_people) if people is not None else None,
                  (args.avoid, avoid_choice) if avoider is not None else None)
+            if recorder is not None:
+                recorder.offer(screen, now)
             clock.tick(RATE_HZ)
     finally:
         print("lying down and closing...")
         dog.close()
+        if recorder is not None:
+            recorder.close()
         if watcher is not None:
             watcher.close()
         if obstacle_watcher is not None:
@@ -659,6 +670,9 @@ def main():
                     help="K calibration: distances of the objects you'll click, in click order, measured ON THE "
                          "FLOOR from the point under the camera lens (default 1.5,2.5,3.0). One distance fits only "
                          "the tilt; two or more also fit the lens and field of view")
+    ap.add_argument("--save", metavar="FILE.mp4",
+                    help="record the window (what the robot sees + all boxes and marks + status) to this video")
+    ap.add_argument("--save-fps", type=float, default=15.0, help="frame rate of the --save video (default 15)")
     args = ap.parse_args()
     if args.people and not args.obstacles:   # before anything connects to the robot
         ap.error("--people needs --obstacles: it stops for a person in the obstacle check's red area")
