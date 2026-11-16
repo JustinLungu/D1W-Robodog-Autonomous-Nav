@@ -35,7 +35,7 @@ camera:
 
 goto:
   max_goal_m: 5.0          # refuse clicked goals further away than this
-  max_vx: 0.5             # m/s (safety.max_vx still caps it)
+  max_vx: 0.3             # m/s (safety.max_vx still caps it)
   max_yaw: 0.6             # rad/s (safety.max_yaw still caps it)
   arrive_m: 0.10           # stop when this close to the goal
   timeout_s: 45.0          # stop if not there after this much driving
@@ -60,7 +60,7 @@ trash:
   conf: 0.25             # confidence needed to START tracking a piece. Lower = finds more, with more false boxes.
                          # (An existing track is continued with weaker detections too, down to 0.1.)
   imgsz: 896             # detector input size (this model was trained at 896). 640 is ~2x faster
-  follow_vx: 0.30        # m/s while driving to a tracked piece: slow, so the tracker keeps up
+  follow_vx: 0.20        # m/s while driving to a tracked piece: slow, so the tracker keeps up
   lost_after_s: 1.0      # not seen for this long -> finish blind, on odometry
   reacquire_m: 0.4       # the tracker renamed the piece: a track this close to the goal is taken as the same
   csrt_max_s: 2.0        # YOLO lost the SELECTED piece: OpenCV's CSRT tracker follows its pixels for up to
@@ -87,10 +87,11 @@ obstacles:
   path_right: 0.64
   vanish_x: 0.488      # where the robot's centre line meets the horizon (measured; the camera is centred)
   height_ratio: 0.37   # (robot top + 10 cm above the camera) / (camera above the floor): 52 cm. Higher things are driven under
-  # Warning distance, as an image row (bigger = closer). For the robot standing:
-  #   0.88 = 1.5 m   0.93 = 1.2 m   0.98 = 1.0 m   1.06 = 0.8 m   1.11 = 0.7 m   1.19 = 0.6 m   (from the camera)
-  # 0.8 m: ~1 s of camera + processing delay at up to 0.6 m/s, plus a little braking.
-  warn_row: 0.9
+  # Warning distance, as an image row (bigger = closer). For the robot standing, from the camera:
+  #   teammate's calibration (122 deg lens): 0.88 = 1.5 m  0.93 = 1.2 m  0.98 = 1.0 m  1.06 = 0.8 m
+  #   our go-to calibration (96 deg, -8.7 deg): 0.90 = 1.76 m  0.92 = 1.6 m  0.96 = 1.4 m  1.00 = 1.2 m
+  #   1.03 = 1.1 m  1.07 = 1.0 m. Above 1.0 = nearer than the floor the camera sees (~1.2 m): depth only.
+  warn_row: 0.9                # ~1.76 m from the camera (bigger = closer, and a bigger yellow box)
   # Going to a tracked trash piece (robodog-goto --trash --obstacles): the piece is in the path on
   # purpose, so its box is left out of the check, grown by this on every side (fraction of the
   # picture width/height) for box jitter and the few frames between detector and depth check.
@@ -110,3 +111,15 @@ people:
   margin: 0.02                 # person box grown by this on every side (fraction of the picture)
   overlap: 0.02                # at least this fraction of the grown box red = the person is in the way
   clear_s: 1.5                 # ...stop until that hasn't been the case for this long
+
+# Getting around obstacles in go-to (robodog-goto --obstacles; switch with --avoid none/backoff):
+#   "none":    stop at an obstacle (the forward block)
+#   "backoff": only when the forward block fires on a real obstacle (red): back up back_m (already
+#              turning a little), turn turn_deg away from the red, drive forward_m, curve gently back
+#              toward the target, then go-to again. No memory, no position estimate.
+#              Dead ends: go-to's timeout ends them
+avoid:
+  method: "backoff"
+  back_m: 0.25            # back up this far when the forward block fires
+  turn_deg: 25            # turn this far away from the side with more red (in total, partly while backing)
+  forward_m: 1.0          # then drive this far on the new heading, to get beside the obstacle

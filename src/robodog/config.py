@@ -101,6 +101,15 @@ class TrashConfig:
 
 
 @dataclass
+class AvoidConfig:
+    """Getting around obstacles in go-to (avoid/)."""
+    method: str              # "none" (stop at obstacles) or "backoff" (back up, turn away, drive on)
+    back_m: float            # backoff: back up this far when the forward block fires
+    turn_deg: float          # backoff: then turn this far away from the side with more red
+    forward_m: float         # backoff: then drive this far on the new heading before go-to again
+
+
+@dataclass
 class PeopleConfig:
     """People: all motion stops while a person is in the obstacle check's red area (vision/people.py)."""
     model: str               # Ultralytics YOLO weights with a "person" class; downloaded on first run
@@ -132,6 +141,7 @@ class Config:
     trash: TrashConfig
     obstacles: ObstaclesConfig
     people: PeopleConfig
+    avoid: AvoidConfig
     sdk_dir: Path  # from config.machine.yaml
 
 
@@ -209,7 +219,7 @@ def load_config(path: str | Path | None = None, machine_path: str | Path | None 
     raw = yaml.safe_load(path.read_text()) or {}
     machine = _load_machine(machine_path)
 
-    unknown = raw.keys() - {"network", "safety", "camera", "goto", "trash", "obstacles", "people"}
+    unknown = raw.keys() - {"network", "safety", "camera", "goto", "trash", "obstacles", "people", "avoid"}
     misplaced = unknown & _MACHINE_KEYS.keys()
     misplaced |= {k for k in ("laptop_ip",) if isinstance(raw.get("network"), dict) and k in raw["network"]}
     misplaced |= {k for k in ("allow_motion",) if isinstance(raw.get("safety"), dict) and k in raw["safety"]}
@@ -235,5 +245,6 @@ def load_config(path: str | Path | None = None, machine_path: str | Path | None 
         trash=_build(TrashConfig, raw.get("trash"), "trash", path),
         obstacles=_build(ObstaclesConfig, raw.get("obstacles"), "obstacles", path),
         people=_build(PeopleConfig, raw.get("people"), "people", path),
+        avoid=_build(AvoidConfig, raw.get("avoid"), "avoid", path),
         sdk_dir=sdk_dir,
     )

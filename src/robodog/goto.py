@@ -25,6 +25,9 @@ Going to a tracked object (target.py) adds two things, so it ends up centred:
   the spot until the heading is within ALIGN_DEG of the aim, then drive the last, blind part.
 Small corrections are sent as pulses of the SDK's minimum turn rate (its average = the wanted
 rate) instead of being dropped: below MIN_YAW the robot ignores a turn command altogether.
+
+Obstacle avoidance (avoid/) drives instead of go-to while it's busy: go-to waits (goal kept), and
+spend() counts that time toward the timeout, so a dead end still ends.
 """
 
 from __future__ import annotations
@@ -208,6 +211,32 @@ class GoTo:
         x, y, yaw = self.nav_pose(robot_pose)
         dx, dy = self.goal[0] - x, self.goal[1] - y
         return dx * math.cos(yaw) + dy * math.sin(yaw), -dx * math.sin(yaw) + dy * math.cos(yaw)
+
+    def rebase_guard(self, pose: tuple[float, float, float]):
+        """Restart the overshoot guard from here: "driven so far + what's still needed now". For when
+        something else moved the robot (obstacle avoidance backing up and around): otherwise every
+        round of "drive toward it, back off" adds up until the guard stops go-to for good."""
+        if self.goal is not None and self.state not in FINAL_STATES:
+            dist = math.hypot(*self.relative(pose))
+            self.needed_m = self.commanded_m + max(0.0, dist - max(self.lim.arrive_m, self.lim.stop_before_m))
+
+    def spend(self, dt: float):
+        """Count time spent on the goal by something else (obstacle avoidance driving instead of
+        go-to) toward the timeout, so a dead end still ends."""
+        if self.goal is not None and self.state not in FINAL_STATES:
+            self._drive_time += dt
+            if self._drive_time > self.lim.timeout_s:
+                self.state = "timeout"
+
+    def target_bearing(self, pose: tuple[float, float, float]) -> tuple[float, float] | None:
+        """(direction to steer for the target as seen from `pose` (rad, + = left), distance to the goal
+        from the robot's middle), or None without a goal. The direction is the aim heading if there
+        is one (tracked object), else toward the goal point."""
+        rel = self.relative(pose)
+        if rel is None:
+            return None
+        bearing = wrap(self.aim_yaw - pose[2]) if self.aim_yaw is not None else math.atan2(rel[1], rel[0])
+        return bearing, math.hypot(*rel)
 
     # ------------------------------------------------------------------ control
     def step(self, pose: tuple[float, float, float], holding: bool, dt: float) -> GoToStep:
