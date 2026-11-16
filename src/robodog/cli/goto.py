@@ -26,7 +26,8 @@ distances, and drive with the teleop keys.
                on the object. Put the value in camera.latency_s
           SPACE  E-STOP (stop + lie down, latched)    Esc  lie down and quit
 
-With --obstacles, the obstacle check runs on the same camera: while something is in the robot's
+With --people (needs --obstacles), a person in the obstacle check's red area stops ALL motion until
+they've gone; go-to pauses. With --obstacles, the obstacle check runs on the same camera: while something is in the robot's
 path (or the check isn't sure), FORWARD driving is blocked for go-to and the keys alike; go-to
 pauses (goal kept). Backward, turning and sideways still work.
 
@@ -54,9 +55,10 @@ from .teleop import key_maps
 
 RATE_HZ = 30
 VIEW_W = 960       # camera view width in the window
-PANEL_H = 215   # room for the obstacle line (--obstacles)
+PANEL_H = 235   # room for the obstacle and person lines (--obstacles, --people)
 BG, FG, DIM = (24, 26, 30), (230, 230, 230), (120, 124, 132)
 GREEN, AMBER, RED, BLUE, CYAN = (80, 200, 120), (240, 180, 60), (235, 70, 70), (90, 160, 240), (80, 210, 230)
+MAGENTA = (230, 80, 230)   # person boxes
 GRID_M = (0.5, 1.0, 1.5, 2.0, 3.0)
 
 
@@ -164,6 +166,22 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
         dog.forward_guard = guard.blocked
         print(f"obstacle check on ({obstacle_watcher.estimator.device}): FORWARD is blocked while something is "
               "ahead or the check isn't sure; go-to pauses meanwhile")
+    # Person check (--people): on the same camera stream. A person close in front stops ALL motion
+    # (SafeDog), and go-to pauses (the goal is kept) until they've gone.
+    person_watcher, people = None, None
+    if args.people:
+        from ..vision.people import PersonDetector, PersonGuard, PersonWatcher
+        from ..vision.trash import camera_for
+
+        pc = cfg.people
+        print("loading the person model...")
+        detector = PersonDetector(pc.model, pc.conf, pc.imgsz)
+        person_watcher = PersonWatcher(frames.get_stamped, detector,
+                                       lambda w, h: camera_for(cfg.camera, w, h, args.posture))
+        people = PersonGuard(person_watcher, obstacle_watcher, pc.margin, pc.overlap, pc.clear_s)
+        dog.stop_guard = people.stop_reason
+        print(f"person check on ({detector.device}): a person in the obstacle check's red area stops ALL "
+              f"motion until that hasn't been the case for {pc.clear_s:.1f} s; go-to pauses meanwhile")
     tele = Teleop(dog, log=print)
     hold_keys, click_keys = key_maps()
 
@@ -336,9 +354,12 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
                 goto.clear()
                 message = "goal cleared: hand driving (odometry 'commanded' can't follow it). Click again"
             blocked = guard.blocked() if guard is not None else None
+            person, seen_people = people.check() if people is not None else (None, [])
             if going and blocked and goto.goal is not None and step.state not in FINAL_STATES:
                 message = f"paused, FORWARD BLOCKED: {blocked}. Back off / turn by hand (S, A/D, Q/E)"
-            step = goto.step(pose, going and not blocked, dt)   # blocked: paused, goal kept
+            if going and person and goto.goal is not None and step.state not in FINAL_STATES:
+                message = f"paused, ALL MOTION STOPPED: {person}. Continues once they've gone"
+            step = goto.step(pose, going and not blocked and not person, dt)   # paused, goal kept
             if going and step.dist is not None and now >= next_log:  # (no goal: nothing to log; G does nothing)
                 next_log = now + 0.5
                 print(f"go-to [{step.state}] goal {step.dist:.2f} m from middle | commanded {goto.commanded_m:.2f} m, "
@@ -370,7 +391,8 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
             if obstacle_watcher is not None and show_obstacles:
                 marks = (obstacle_watcher.latest()[0], ocfg)
             draw(screen, (big, mid, small), frame, scale, view_h, model, grid, goto, step, pose, seen_pose, tele,
-                 status, message, calibrating, last_click, drive_ok, fake, g_held, latency, trash, obstacle, marks)
+                 status, message, calibrating, last_click, drive_ok, fake, g_held, latency, trash, obstacle, marks,
+                 (person, seen_people) if people is not None else None)
             clock.tick(RATE_HZ)
     finally:
         print("lying down and closing...")
@@ -379,11 +401,14 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
             watcher.close()
         if obstacle_watcher is not None:
             obstacle_watcher.close()
+        if person_watcher is not None:
+            person_watcher.close()
         pg.quit()
 
 
 def draw(screen, fonts, frame, scale, view_h, model, grid, goto, step, pose, seen_pose, tele, status, message,
-         calibrating, last_click, drive_ok, fake, g_held, latency, trash=None, obstacle=None, marks=None):
+         calibrating, last_click, drive_ok, fake, g_held, latency, trash=None, obstacle=None, marks=None,
+         person=None):
     import pygame as pg
 
     big, mid, small = fonts
@@ -411,6 +436,16 @@ def draw(screen, fonts, frame, scale, view_h, model, grid, goto, step, pose, see
 
     if last_click and not goto.goal:
         pg.draw.circle(screen, AMBER, sp(last_click[:2]), 6, 2)
+
+    # People (--people): magenta boxes with their distance; "close" if they stop the robot.
+    if person is not None:
+        for pp in person[1]:
+            x0, y0 = sp(pp.box[:2])
+            x1, y1 = sp(pp.box[2:])
+            pg.draw.rect(screen, MAGENTA, (x0, y0, max(1, x1 - x0), max(1, y1 - y0)), 2)
+            d = "very close" if pp.dist is None else f"{pp.dist:.1f} m"
+            lab = small.render(f"person {pp.conf:.2f}  {d}", True, (0, 0, 0), MAGENTA)
+            screen.blit(lab, (x0, y0 - lab.get_height() if y0 > lab.get_height() else y1))
 
     # Tracked trash: a box per piece with its ID, class, confidence and distance.
     if trash is not None:
@@ -494,6 +529,12 @@ def draw(screen, fonts, frame, scale, view_h, model, grid, goto, step, pose, see
         screen.blit(small.render(tl, True, tcol), (12, y))
         y += 20
     y += 4
+    if person is not None:     # (why everything is stopped or None, people seen) from the person guard
+        if person[0]:
+            screen.blit(small.render(f"ALL MOTION STOPPED: {person[0]}", True, RED), (12, y))
+        else:
+            screen.blit(small.render("no person close", True, GREEN), (12, y))
+        y += 20
     if obstacle is not None:   # (level, text, checks per second) from the forward guard
         level, text, fps = obstacle
         if level == "clear":
@@ -525,6 +566,9 @@ def main():
     ap.add_argument("--hfov", type=float, help="override camera.hfov_deg (e.g. 70 for a laptop webcam)")
     ap.add_argument("--trash", action="store_true",
                     help="detect + track trash (needs the vision extra): click a box to go to that piece")
+    ap.add_argument("--people", action="store_true",
+                    help="person check (needs --obstacles): a person in the obstacle check's red area stops "
+                         "ALL motion until they've gone; go-to pauses meanwhile")
     ap.add_argument("--obstacles", action="store_true",
                     help="obstacle check on the camera (needs the vision extra): FORWARD is blocked while "
                          "something is in the robot's path or the check isn't sure; go-to pauses meanwhile")
@@ -536,6 +580,8 @@ def main():
                          "FLOOR from the point under the camera lens (default 1.5,2.5,3.0). One distance fits only "
                          "the tilt; two or more also fit the lens and field of view")
     args = ap.parse_args()
+    if args.people and not args.obstacles:   # before anything connects to the robot
+        ap.error("--people needs --obstacles: it stops for a person in the obstacle check's red area")
 
     try:
         import pygame  # noqa: F401

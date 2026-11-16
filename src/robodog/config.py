@@ -101,6 +101,17 @@ class TrashConfig:
 
 
 @dataclass
+class PeopleConfig:
+    """People: all motion stops while a person is in the obstacle check's red area (vision/people.py)."""
+    model: str               # Ultralytics YOLO weights with a "person" class; downloaded on first run
+    conf: float              # detection confidence needed (0-1)
+    imgsz: int               # detector input size in pixels
+    margin: float            # person box grown by this (fraction of the picture) before the overlap test
+    overlap: float           # at least this fraction of the (grown) box red = the person is in the way
+    clear_s: float           # ...stop until that hasn't been the case for this long
+
+
+@dataclass
 class ObstaclesConfig:
     """Camera-based obstacle warning (vision/obstacles.py explains each value)."""
     path_left: float
@@ -119,6 +130,7 @@ class Config:
     goto: GoToConfig
     trash: TrashConfig
     obstacles: ObstaclesConfig
+    people: PeopleConfig
     sdk_dir: Path  # from config.machine.yaml
 
 
@@ -196,7 +208,7 @@ def load_config(path: str | Path | None = None, machine_path: str | Path | None 
     raw = yaml.safe_load(path.read_text()) or {}
     machine = _load_machine(machine_path)
 
-    unknown = raw.keys() - {"network", "safety", "camera", "goto", "trash", "obstacles"}
+    unknown = raw.keys() - {"network", "safety", "camera", "goto", "trash", "obstacles", "people"}
     misplaced = unknown & _MACHINE_KEYS.keys()
     misplaced |= {k for k in ("laptop_ip",) if isinstance(raw.get("network"), dict) and k in raw["network"]}
     misplaced |= {k for k in ("allow_motion",) if isinstance(raw.get("safety"), dict) and k in raw["safety"]}
@@ -221,5 +233,6 @@ def load_config(path: str | Path | None = None, machine_path: str | Path | None 
         goto=_build(GoToConfig, raw.get("goto"), "goto", path),
         trash=_build(TrashConfig, raw.get("trash"), "trash", path),
         obstacles=_build(ObstaclesConfig, raw.get("obstacles"), "obstacles", path),
+        people=_build(PeopleConfig, raw.get("people"), "people", path),
         sdk_dir=sdk_dir,
     )
