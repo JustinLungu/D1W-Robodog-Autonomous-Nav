@@ -490,6 +490,18 @@ Cropping isn't faster (the model scales by the short side, so a wide crop has *m
 
 **Known limits:** glass, mirrors, very thin things (chair legs, cables) and low flat things can be missed; a floor that isn't flat (ramps, steps, thick mats) confuses the floor fit. With `--record` and `--obstacles` together the camera stream is opened twice (2 × ~5 Mbit/s).
 
+### 6.9b People: full stop (`--people`, with `--obstacles`)
+A small standard YOLO (Ultralytics `yolo11n`, knows "person") runs on the laptop next to the obstacle check, on the same camera stream. **A person whose box overlaps the obstacle check's red area** (in the robot's path, closer than `obstacles.warn_row`) **stops ALL motion**: forward, backward, turning and sideways, for the keys and go-to alike, until that hasn't been the case for `people.clear_s` (1.5 s). So "close" means the same as for any obstacle; a person just gets a full stop instead of a forward block, because they may step beside or behind the robot where the camera can't see. Standing up, lying down and the e-stop still work.
+```bash
+uv run --no-sync --extra vision-gpu robodog-teleop --allow-motion --obstacles --people
+uv run --no-sync --extra vision-gpu robodog-goto --allow-motion --trash --obstacles --people
+```
+- **Overlap test:** the person box is grown by `people.margin` (2 % of the picture on every side, because the two checks look at frames a few hundredths of a second apart); if at least `people.overlap` (2 %) of it is red, the person is in the way. A person beside the path or further than the warning line doesn't stop anything (they're not red).
+- **First run needs internet:** the model (~5 MB) is downloaded from Ultralytics' GitHub releases into `models/` (git-ignored). After that it works offline.
+- **When unsure, it stops:** no picture yet (the first seconds), a picture older than 1.5 s in either check, or either check crashed.
+- People are drawn as **magenta boxes** (with their floor distance, for information); teleop shows a red **STOPPED: PERSON in the way** bar, go-to `ALL MOTION STOPPED: ...` and pauses (goal kept), then continues by itself. The terminal logs `ALL MOTION STOPPED: ...` / `motion allowed again`.
+- Settings: `people:` in `config.local.yaml`. Code: [vision/people.py](src/robodog/vision/people.py), SafeDog's `stop_guard`.
+
 ### 6.10 The robot's own person detection (just for a look)
 The robot already runs a person detector on its NPU (`detection_2d_node`, YOLO11n, classes person and car). It's meant for a "follow me" feature and nothing in our code uses it. This shows its boxes on the live camera, by **listening** to its ROS 2 topic `/perception/detection2d` from the laptop: nothing is sent to the robot, nothing runs on it, no ROS install needed.
 
@@ -633,6 +645,8 @@ In code, connect with `initRobot("192.168.168.10", 43988, "192.168.168.168")`.
 ---
 
 ## 9. Troubleshooting
+
+**Switching laptops, offline use, picture problems and more: see [TROUBLESHOOT.md](TROUBLESHOOT.md)** (step-by-step commands).
 
 | Symptom | Cause / fix |
 |---|---|

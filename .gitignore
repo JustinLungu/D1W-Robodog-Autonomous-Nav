@@ -12,3 +12,9 @@ recordings/
 
 # Per-laptop settings (created automatically on first run)
 config.machine.yaml
+
+# Personal task list (not shared)
+ROADMAP.md
+
+# Downloaded model weights
+models/

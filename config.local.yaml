@@ -90,8 +90,21 @@ obstacles:
   # Warning distance, as an image row (bigger = closer). For the robot standing:
   #   0.88 = 1.5 m   0.93 = 1.2 m   0.98 = 1.0 m   1.06 = 0.8 m   1.11 = 0.7 m   1.19 = 0.6 m   (from the camera)
   # 0.8 m: ~1 s of camera + processing delay at up to 0.6 m/s, plus a little braking.
-  warn_row: 1.06
+  warn_row: 0.9
   # Going to a tracked trash piece (robodog-goto --trash --obstacles): the piece is in the path on
   # purpose, so its box is left out of the check, grown by this on every side (fraction of the
   # picture width/height) for box jitter and the few frames between detector and depth check.
   target_margin: 0.03
+
+# People (robodog-teleop / robodog-goto --obstacles --people): a person whose box overlaps the
+# obstacle check's RED area (in the robot's path, closer than obstacles.warn_row) stops ALL motion
+# (forward, back, turning, sideways) until that hasn't been the case for clear_s. Also stops when
+# either check isn't sure (no picture yet, old picture, crashed).
+people:
+  model: "models/yolo11n.pt"   # Ultralytics' small standard YOLO (knows "person"). Downloaded on the
+                               # first run (~5 MB, needs internet) into models/ (git-ignored)
+  conf: 0.4                    # detection confidence needed
+  imgsz: 640                   # detector input size (px)
+  margin: 0.02                 # person box grown by this on every side (fraction of the picture)
+  overlap: 0.02                # at least this fraction of the grown box red = the person is in the way
+  clear_s: 1.5                 # ...stop until that hasn't been the case for this long

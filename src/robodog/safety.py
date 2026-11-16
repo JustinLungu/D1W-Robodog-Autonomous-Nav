@@ -104,6 +104,10 @@ class SafeDog:
         # (e.g. "OBSTACLE AHEAD"), or None if it is. Asked every tick; see tick() step 6.
         self.forward_guard: Callable[[], str | None] | None = None
         self.forward_blocked: str | None = None   # the guard's latest answer (for display)
+        # Stop guard: like the forward guard, but while it gives a reason (e.g. "PERSON at 1.4 m")
+        # EVERY speed is 0. Standing up / lying down / the e-stop still work.
+        self.stop_guard: Callable[[], str | None] | None = None
+        self.stopped_for: str | None = None       # its latest answer (for display)
 
         # --- the loop thread ---
         self._thread: threading.Thread | None = None
@@ -321,7 +325,8 @@ class SafeDog:
           3. battery too low?     -> halt   (checked once per battery_check_period, not every tick)
           4. not standing?        -> send nothing
           5. otherwise            -> send move() with the latest speed, or 0 if it's stale (dead-man)
-                                     and forward speed 0 while the forward guard says blocked
+                                     and forward speed 0 while the forward guard says blocked,
+                                     every speed 0 while the stop guard says stop
         """
         with self._lock:
             if self._fault:
@@ -359,6 +364,7 @@ class SafeDog:
                 # Forward block (obstacle ahead): no forward speed, whoever asked for it.
                 # Backward, sideways and turning still go through, to get away from it.
                 cmd = self._apply_forward_block(cmd)
+                cmd = self._apply_stop_guard(cmd)
                 # Sending every tick, even when it's (0,0,0), is also the keepalive:
                 # the robot lies down by itself after 3 s without commands.
                 self._check_rc("move", self.robot.move(*cmd))
@@ -383,6 +389,20 @@ class SafeDog:
         if reason and cmd[0] > 0:
             return (0.0, cmd[1], cmd[2])
         return cmd
+
+    def _apply_stop_guard(self, cmd: tuple[float, float, float]) -> tuple[float, float, float]:
+        """Ask the stop guard (if any); while it says stop, every speed is 0. A guard that crashes
+        counts as stop."""
+        if self.stop_guard is None:
+            return cmd
+        try:
+            reason = self.stop_guard()
+        except Exception as e:
+            reason = f"person check failed: {e!r}"
+        if reason != self.stopped_for:
+            self.log(f"ALL MOTION STOPPED: {reason}" if reason else "motion allowed again")
+            self.stopped_for = reason
+        return (0.0, 0.0, 0.0) if reason else cmd
 
     def _halt(self, reason: str):
         """Controlled stop after a problem: zero speed, try to lie down, latch a fault.

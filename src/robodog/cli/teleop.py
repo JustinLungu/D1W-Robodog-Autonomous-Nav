@@ -9,6 +9,9 @@
                                             # picture and what it detects in the window. While something
                                             # is ahead (or the check isn't sure), FORWARD is blocked;
                                             # backward, turning and sideways still work.
+    uv run robodog-teleop --allow-motion --obstacles --people
+                                            # also: a PERSON in the red (close, in the path) area
+                                            # stops ALL motion until they've gone
 
 Needs allow_motion: true in config.machine.yaml AND --allow-motion (not for --fake).
 
@@ -40,7 +43,8 @@ from .status import MODES
 
 RATE_HZ = 30
 
-W, H = 560, 430
+W, H = 560, 480
+MAGENTA = (230, 80, 230)   # person boxes
 VIEW_H = W * 9 // 16   # --obstacles: camera picture above the panel (16:9, window width)
 BG, FG, DIM = (24, 26, 30), (230, 230, 230), (120, 124, 132)
 GREEN, AMBER, RED, BLUE = (80, 200, 120), (240, 180, 60), (235, 70, 70), (90, 160, 240)
@@ -80,7 +84,7 @@ def camera_view(watcher, ocfg):
     return pg.surfarray.make_surface(cv2.cvtColor(img, cv2.COLOR_BGR2RGB).swapaxes(0, 1))
 
 
-def draw(screen, fonts, st, status, fake, rec=None, obstacle=None):
+def draw(screen, fonts, st, status, fake, rec=None, obstacle=None, person=None):
     """The status panel (W x H). The caller shows it (pg.display.flip())."""
     import pygame as pg
 
@@ -126,6 +130,19 @@ def draw(screen, fonts, st, status, fake, rec=None, obstacle=None):
     for h in help_lines:
         screen.blit(small.render(h, True, DIM), (20, y)); y += 22
 
+    if person is not None:     # (why everything is stopped, or None) from the person guard
+        y += 8
+        if person:
+            pg.draw.rect(screen, RED, (12, y, W - 24, 40), border_radius=6)
+            surf = mid.render(f"STOPPED: {person}", True, (255, 255, 255))
+            if surf.get_width() > W - 40:   # long reason: smaller font so it fits
+                surf = small.render(f"STOPPED: {person}"[:70], True, (255, 255, 255))
+            screen.blit(surf, ((W - surf.get_width()) // 2, y + 8))
+            y += 40
+        else:
+            screen.blit(small.render("no person close", True, GREEN), (20, y + 10))
+            y += 26
+
     if obstacle is not None:   # (level, text, checks per second) from the forward guard
         level, text, fps = obstacle
         y += 8
@@ -142,7 +159,8 @@ def draw(screen, fonts, st, status, fake, rec=None, obstacle=None):
         screen.blit(mid.render("click this window to control", True, AMBER), (20, H - 36))
 
 
-def run(dog: SafeDog, fake: bool, rec: Recorder | None = None, watcher=None, ocfg=None, guard=None):
+def run(dog: SafeDog, fake: bool, rec: Recorder | None = None, watcher=None, ocfg=None, guard=None,
+        people=None, camera=None):
     import pygame as pg
 
     pg.init()
@@ -216,11 +234,22 @@ def run(dog: SafeDog, fake: bool, rec: Recorder | None = None, watcher=None, ocf
                 if res is not view_res:   # a new check: redraw the picture (not 30 times a second)
                     view, view_res = camera_view(watcher, ocfg), res
 
+            person, seen = None, []
+            if people is not None:
+                person, seen = people.check()
+
             if view_h:
                 screen.fill(BG, (0, 0, W, view_h))
                 if view is not None:
                     screen.blit(view, (0, 0))
-            draw(panel, fonts, st, status, fake, rec, obstacle)
+                    frame = camera.get()[0] if camera is not None else None
+                    if frame is not None:   # person boxes, scaled from the frame to the view
+                        kx, ky = W / frame.shape[1], VIEW_H / frame.shape[0]
+                        for p in seen:
+                            x0, y0, x1, y1 = p.box
+                            pg.draw.rect(screen, MAGENTA, (int(x0 * kx), int(y0 * ky),
+                                                           max(1, int((x1 - x0) * kx)), max(1, int((y1 - y0) * ky))), 2)
+            draw(panel, fonts, st, status, fake, rec, obstacle, person)
             pg.display.flip()
             clock.tick(RATE_HZ)
     finally:
@@ -238,10 +267,15 @@ def main():
     ap.add_argument("--note", default="", help="free text saved with the recording (where, what you tested)")
     ap.add_argument("--camera", help="camera to record / watch (default: robot camera; with --fake: none). "
                                      "e.g. /dev/video0 for a webcam, or a video file for --obstacles")
+    ap.add_argument("--people", action="store_true",
+                    help="person check (needs --obstacles): a person in the obstacle check's red area stops "
+                         "ALL motion until they've gone (settings: people: in config.local.yaml)")
     ap.add_argument("--obstacles", action="store_true",
                     help="obstacle check (needs the vision extra): FORWARD is blocked while something is in "
                          "the robot's path or the check isn't sure; backward, turning and sideways still work")
     args = ap.parse_args()
+    if args.people and not args.obstacles:   # before anything connects to the robot
+        ap.error("--people needs --obstacles: it stops for a person in the obstacle check's red area")
 
     try:
         import pygame  # noqa: F401
@@ -280,33 +314,54 @@ def main():
         })
         print(f"recording to {rec.dir}" + ("" if camera else " (commands only, no video)"))
 
-    watcher, ocfg, guard = None, None, None
-    if args.obstacles:
+    watcher, ocfg, guard, people, person_watcher, camera = None, None, None, None, None, None
+    if args.obstacles or args.people:
+        # One camera stream, shared by both checks (two streams over Wi-Fi garble the picture).
         source = args.camera or (None if args.fake else f"rtsp://{cfg.network.robot_ip}:8554/test")
         if source is None:
-            raise SystemExit("--obstacles with --fake needs --camera (a webcam like /dev/video0, or a video file)")
+            raise SystemExit("--obstacles / --people with --fake need --camera (a webcam like /dev/video0, or a video file)")
+        from ..vision.camera import LatestFrameReader
+
+        try:
+            camera = LatestFrameReader(source)
+        except RuntimeError as e:   # camera could not be opened
+            raise SystemExit(f"camera: {e}")
+    if args.obstacles:
         from ..vision.obstacles import from_settings
         from ..vision.watcher import ObstacleWatcher
 
         print("loading the depth model for the obstacle warning...")
         ocfg = from_settings(cfg.obstacles)
-        try:
-            watcher = ObstacleWatcher(source, ocfg)
-        except RuntimeError as e:   # camera could not be opened
-            raise SystemExit(f"obstacle warning: {e}")
+        watcher = ObstacleWatcher(None, ocfg, camera=camera)
         guard = ForwardGuard(watcher)
         dog.forward_guard = guard.blocked   # SafeDog zeroes forward speed while this says blocked
+    if args.people:
+        from ..vision.people import PersonDetector, PersonGuard, PersonWatcher
+        from ..vision.trash import camera_for
+
+        p = cfg.people
+        print("loading the person model...")
+        detector = PersonDetector(p.model, p.conf, p.imgsz)
+        person_watcher = PersonWatcher(camera.get, detector, lambda w, h: camera_for(cfg.camera, w, h))
+        people = PersonGuard(person_watcher, watcher, p.margin, p.overlap, p.clear_s)
+        dog.stop_guard = people.stop_reason   # SafeDog sends 0 for EVERY speed while this says stop
+        print(f"person check on ({detector.device}): a person in the obstacle check's red area stops ALL "
+              f"motion until that hasn't been the case for {p.clear_s:.1f} s")
         print(f"obstacle check on ({watcher.estimator.device}): FORWARD is blocked while something is ahead "
               "or the check isn't sure. Backward, turning and sideways still work.")
 
     print("window open: click it, then R to stand up. Esc to quit.")
     try:
-        run(dog, args.fake, rec, watcher, ocfg, guard)  # lies the robot down before returning
+        run(dog, args.fake, rec, watcher, ocfg, guard, people, camera)  # lies the robot down before returning
     except KeyboardInterrupt:
         print("\nCtrl+C")
     finally:
         if watcher:
             watcher.close()
+        if person_watcher:
+            person_watcher.close()
+        if camera:
+            camera.close()
         if rec:
             rec.stop()  # after run(), so the video also shows the robot lying down
 
