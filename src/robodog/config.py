@@ -106,6 +106,7 @@ class PeopleConfig:
     model: str               # Ultralytics YOLO weights with a "person" class; downloaded on first run
     conf: float              # detection confidence needed (0-1)
     imgsz: int               # detector input size in pixels
+    warn_row: float          # like obstacles.warn_row (same scale), for people: bigger = closer
     margin: float            # person box grown by this (fraction of the picture) before the overlap test
     overlap: float           # at least this fraction of the (grown) box red = the person is in the way
     clear_s: float           # ...stop until that hasn't been the case for this long

@@ -74,6 +74,9 @@ class ObstacleResult:
     reason: str = ""
     horizon: float = 0.0         # estimated horizon row (fraction), for display
     classes: np.ndarray | None = None  # per pixel, for display: see CLASSES
+    # Per pixel at work resolution, for checks with their own warning distance (people.warn_row):
+    in_path: np.ndarray | None = None  # sticks up from the floor, inside the robot-sized window (bool)
+    foot: np.ndarray | None = None     # the image row it stands on: >= a warn_row = on or before that line
 
     @property
     def warn(self) -> bool:
@@ -208,11 +211,14 @@ class ObstacleChecker:
             nearness = 0.0
 
         status = "warning" if area >= c.min_area else "clear"
-        return ObstacleResult(status, nearness, area, obstacle, horizon=horizon, classes=classes)
+        return ObstacleResult(status, nearness, area, obstacle, horizon=horizon, classes=classes,
+                              in_path=in_path, foot=foot)
 
 
-def draw_overlay(bgr: np.ndarray, res: ObstacleResult, cfg: ObstacleConfig) -> np.ndarray:
-    """Camera image with the path polygon, warning line, obstacle pixels and the verdict."""
+def draw_overlay(bgr: np.ndarray, res: ObstacleResult, cfg: ObstacleConfig,
+                 people_row: float | None = None) -> np.ndarray:
+    """Camera image with the path polygon, warning line, obstacle pixels and the verdict.
+    people_row: also draw the people's warning line (people.warn_row) across the path, in magenta."""
     img = bgr.copy()
     H, W = img.shape[:2]
     s = max(1.0, H / 720)
@@ -241,6 +247,9 @@ def draw_overlay(bgr: np.ndarray, res: ObstacleResult, cfg: ObstacleConfig) -> n
         xl, xr = int(bl * (W - 1)), int(br * (W - 1))
         yt, yw = int(bt * (H - 1)), int(cfg.warn_row * (H - 1))
         cv2.rectangle(img, (xl, yt), (xr, yw), (0, 220, 255), lw)
+        if people_row is not None and people_row > hz:   # a person at or before this line stops everything
+            cv2.line(img, edge(cfg.path_bottom[0], people_row), edge(cfg.path_bottom[1], people_row),
+                     (230, 80, 230), lw, cv2.LINE_AA)
     text = {"warning": "OBSTACLE AHEAD", "clear": "clear", "blocked": f"BLOCKED ({res.reason})"}[res.status]
     if res.status != "blocked":
         text += f"   near {res.nearness:.2f}  area {res.area * 100:.1f}%"
@@ -256,6 +265,11 @@ def draw_overlay(bgr: np.ndarray, res: ObstacleResult, cfg: ObstacleConfig) -> n
                 fs, (0, 0, 0), int(4 * s), cv2.LINE_AA)
     cv2.putText(img, "yellow box: outside its sides/top is ignored", (int(14 * s), y), cv2.FONT_HERSHEY_SIMPLEX,
                 fs, (0, 220, 255), max(1, int(s)), cv2.LINE_AA)
+    if people_row is not None:
+        y += int(24 * s)
+        for col, th in (((0, 0, 0), int(4 * s)), ((230, 80, 230), max(1, int(s)))):
+            cv2.putText(img, "magenta line: a person before it stops everything", (int(14 * s), y),
+                        cv2.FONT_HERSHEY_SIMPLEX, fs, col, th, cv2.LINE_AA)
     org = (int(20 * s), int(H - 20 * s))
     cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, 0.9 * s, (0, 0, 0), int(5 * s), cv2.LINE_AA)
     cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, 0.9 * s, color, int(2 * s), cv2.LINE_AA)
