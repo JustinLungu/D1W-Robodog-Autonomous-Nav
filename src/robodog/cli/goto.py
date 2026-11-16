@@ -18,6 +18,10 @@ distances, and drive with the teleop keys.
   MOUSE   click the floor        set the goal (shown as a ring; red = refused)
           click a trash box      (--trash) go to that piece, tracking it while it's in view
   HOLD    G                      go to the goal. Let go = stop (the goal is kept)
+  PRESS   T                      autonomous run, no key held: stands up if needed, goes to the goal and
+                                 lies down when it arrives. Stopped by SPACE (e-stop), Esc, T again, F,
+                                 C, any drive key, or the window losing focus. If go-to fails (timeout
+                                 etc.) it stops and stays standing.
   HOLD    W/S A/D Q/E (arrows)   drive by hand, like robodog-teleop (overrides G)
   CLICK   R stand   F lie down   C clear goal   1/2/3 speed (hand driving)
           K  calibrate: click the bases of objects at the --calib-distances, in that order
@@ -216,6 +220,15 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
     history = PoseHistory()
     latency = cam_cfg.latency_s if frames.reader else 0.0
     frame, frame_t = None, time.monotonic()
+    # T = autonomous run: stand up if needed, go to the goal, lie down on arrival. No key held.
+    # None | "standing" (waiting for the stand to finish) | "going"
+    auto, auto_since = None, 0.0
+
+    def stop_auto(why):
+        nonlocal auto, message
+        if auto is not None:
+            auto, message = None, f"autonomous run stopped: {why}"
+            print(message)
 
     try:
         while not tele.quit:
@@ -224,7 +237,24 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
                     tele.quit = True
                 elif ev.type == pg.KEYDOWN:
                     if ev.key in click_keys:
+                        if click_keys[ev.key] in ("estop", "lie_down", "quit"):
+                            stop_auto({"estop": "E-STOP", "lie_down": "F pressed", "quit": "Esc"}[click_keys[ev.key]])
                         tele.action(click_keys[ev.key])
+                    elif ev.key == pg.K_t:
+                        if auto is not None:
+                            stop_auto("T pressed")
+                        elif not drive_ok:
+                            message = "T: camera not measured, can't drive to a goal"
+                        elif goto.goal is None or step.state in FINAL_STATES:
+                            message = "T: click a goal (floor or trash box) first"
+                        elif tele.state().fault:
+                            message = f"T: {tele.state().fault}"
+                        else:
+                            auto, auto_since = ("going" if tele.standing and dog.settled() else "standing"), time.monotonic()
+                            if not tele.standing:
+                                tele.action("stand")
+                            message = "AUTONOMOUS: going to the goal, lies down there. SPACE e-stop, Esc quit, T cancel"
+                            print(message)
                     elif ev.key in (pg.K_LEFTBRACKET, pg.K_RIGHTBRACKET):
                         step_s = 0.05 if ev.key == pg.K_RIGHTBRACKET else -0.05
                         latency = round(max(0.0, latency + step_s), 2)
@@ -234,6 +264,7 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
                         show_obstacles = not show_obstacles
                         message = "obstacle marks " + ("shown" if show_obstacles else "hidden (the check still runs)")
                     elif ev.key == pg.K_c:
+                        stop_auto("goal cleared")
                         goto.clear()
                         follower.drop()
                         message = "goal cleared"
@@ -243,6 +274,7 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
                                    if calibrating else "calibration cancelled")
                 elif ev.type in (pg.WINDOWFOCUSLOST, pg.WINDOWHIDDEN, pg.WINDOWMINIMIZED):
                     tele.release_all()
+                    stop_auto("the window lost focus")
                 elif ev.type == pg.MOUSEBUTTONDOWN and ev.button == 1 and ev.pos[1] < view_h:
                     u, v = ev.pos[0] / scale, ev.pos[1] / scale
                     if calibrating:
@@ -301,6 +333,16 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
             g_held = bool(pressed is not None and pressed[pg.K_g])
             if not focused:
                 tele.release_all()
+                stop_auto("the window lost focus")
+            if hand:
+                stop_auto("hand driving")
+            if auto is not None and (dog.fault or tele.state().fault):
+                stop_auto(tele.state().fault or "robot fault")
+            if auto == "standing":
+                if tele.standing and dog.settled():
+                    auto = "going"
+                elif time.monotonic() - auto_since > 15.0:
+                    stop_auto("didn't stand up within 15 s")
 
             try:
                 pose = dog.pose()
@@ -330,7 +372,8 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
                 obstacle_watcher.ignore(None if box is None else target_box(box, fw, fh, cfg.obstacles.target_margin))
             # Slow while going to a tracked piece, so the tracker keeps up; normal speed otherwise.
             limits.max_vx = min(base_max_vx, cfg.trash.follow_vx) if follower.track_id is not None else base_max_vx
-            going = (g_held and not hand and drive_ok and tele.standing and dog.settled() and not dog.fault)
+            going = ((g_held or auto == "going") and not hand and drive_ok and tele.standing and dog.settled()
+                     and not dog.fault)
             if hand and goto.goal is not None and goto.lim.odometry == "commanded":
                 # Our own position count only knows go-to's commands, not hand driving.
                 goto.clear()
@@ -339,6 +382,18 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
             if going and blocked and goto.goal is not None and step.state not in FINAL_STATES:
                 message = f"paused, FORWARD BLOCKED: {blocked}. Back off / turn by hand (S, A/D, Q/E)"
             step = goto.step(pose, going and not blocked, dt)   # blocked: paused, goal kept
+            if auto == "going" and step.state in FINAL_STATES:
+                if step.state == "arrived":
+                    auto, going = None, False
+                    tele.action("lie_down")
+                    message = "autonomous run done: arrived, lying down"
+                    print(message)
+                else:
+                    going = False
+                    stop_auto(f"go-to ended with '{step.state}' (still standing)")
+            elif auto == "going" and goto.goal is None:
+                going = False
+                stop_auto("no goal any more")
             if going and step.dist is not None and now >= next_log:  # (no goal: nothing to log; G does nothing)
                 next_log = now + 0.5
                 print(f"go-to [{step.state}] goal {step.dist:.2f} m from middle | commanded {goto.commanded_m:.2f} m, "
@@ -370,7 +425,8 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
             if obstacle_watcher is not None and show_obstacles:
                 marks = (obstacle_watcher.latest()[0], ocfg)
             draw(screen, (big, mid, small), frame, scale, view_h, model, grid, goto, step, pose, seen_pose, tele,
-                 status, message, calibrating, last_click, drive_ok, fake, g_held, latency, trash, obstacle, marks)
+                 status, message, calibrating, last_click, drive_ok, fake, g_held or auto is not None, latency,
+                 trash, obstacle, marks, auto)
             clock.tick(RATE_HZ)
     finally:
         print("lying down and closing...")
@@ -383,7 +439,7 @@ def run(dog: SafeDog, cfg, frames: Frames, args, fake: bool, tracker=None):
 
 
 def draw(screen, fonts, frame, scale, view_h, model, grid, goto, step, pose, seen_pose, tele, status, message,
-         calibrating, last_click, drive_ok, fake, g_held, latency, trash=None, obstacle=None, marks=None):
+         calibrating, last_click, drive_ok, fake, g_held, latency, trash=None, obstacle=None, marks=None, auto=None):
     import pygame as pg
 
     big, mid, small = fonts
@@ -450,10 +506,14 @@ def draw(screen, fonts, frame, scale, view_h, model, grid, goto, step, pose, see
     y = view_h + 8
     if tele.state().fault:
         title, col = "E-STOP" if "E-STOP" in tele.state().fault else "FAULT", RED
+    elif auto == "standing":
+        title, col = "AUTO: standing up", GREEN
     elif not tele.standing:
         title, col = "LYING DOWN", DIM
     elif step.state in ("turning", "aligning", "driving"):
-        title, col = f"GOING ({step.state})", GREEN
+        title, col = ("AUTO " if auto else "") + f"GOING ({step.state})", GREEN
+    elif auto:
+        title, col = f"AUTO ({step.state})", AMBER
     else:
         title, col = "STANDING", BLUE
     screen.blit(big.render(title, True, col), (12, y))
@@ -504,7 +564,8 @@ def draw(screen, fonts, frame, scale, view_h, model, grid, goto, step, pose, see
     msg = tele.state().fault or message
     screen.blit(small.render(msg[:120], True, RED if tele.state().fault else AMBER), (12, y))
     y += 22
-    for h in ("CLICK floor/box = goal   HOLD G = go   HOLD WASD/QE = hand drive   R stand  F lie  C clear  K calibrate",
+    for h in ("CLICK floor/box = goal   HOLD G = go   T = go by itself + lie down there   HOLD WASD/QE = hand drive",
+              "R stand  F lie  C clear  K calibrate",
               "[ ] camera delay -/+   O obstacle marks   SPACE e-stop   Esc quit   (window must have focus)"):
         screen.blit(small.render(h, True, DIM), (12, y))
         y += 18
